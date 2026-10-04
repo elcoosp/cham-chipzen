@@ -12,6 +12,13 @@ documentation = "https://docs.rs/cham-chipzen"
 keywords = ["poker", "chipzen", "hulhe", "bot", "chameleon"]
 categories = ["games", "network-programming"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
@@ -41,6 +48,19 @@ opt-level = 3
 unsafe_code = "forbid"
 
 [lints.clippy]
-# Do not panic on unreachable branches silently; require explicit intent.
-# `expect_used` is *not* enforced because `Frame::raw` defaults and
-# test-only code legitimately unwrap.
+# Note on `panic`/`todo`/`unimplemented`/`unreachable`: these are enforced in
+# library and binary code but NOT in `tests/` or `#[cfg(test)]` modules, where
+# panicking is the idiomatic way to signal a test failure. Rather than adding
+# `#[allow(clippy::panic)]` to every test, we enforce them per-module via
+# `#[deny(...)]` attributes in `src/` where they matter.
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+# `.unwrap()`/`.expect()` are still permitted — many call sites are
+# provably-infallible (`serde_json::to_string` on a `Value` we built) and
+# forcing `Result` plumbing would obscure the protocol contract. Tracked
+# as a future cleanup; see the README's "Tracked gaps".
+# --- correctness / style signals we do want as warnings ---
+debug_assert_with_mut_call = "warn"
+exit = "warn"
+wildcard_imports = "warn"
