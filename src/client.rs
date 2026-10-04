@@ -348,9 +348,18 @@ pub async fn handle_match_message(
             );
             Ok(None)
         }
-        // match_start / round_start / phase_change / round_result /
-        // action_timeout / session_control / session_token / reconnected and
-        // any unknown future type: silently ignore (forward compat).
+        // A new hand has begun. Signal the brain so it can close out the
+        // previous hand (feeding the tracker if terminal) and prepare a
+        // fresh shadow state for the new hand's first turn_request.
+        "round_start" | "hand_start" | "deal" => {
+            if let Some(b) = brain {
+                b.lock().await.note_new_hand();
+            }
+            Ok(None)
+        }
+        // match_start / phase_change / round_result / action_timeout /
+        // session_control / session_token / reconnected and any unknown
+        // future type: silently ignore (forward compat).
         other => {
             debug!("match: observed frame type={other}");
             Ok(None)
