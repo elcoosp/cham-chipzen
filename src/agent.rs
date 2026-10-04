@@ -38,6 +38,7 @@ use tracing::{info, warn};
 
 /// Map a platform action name + params to one of the engine's canonical
 /// actions. Returns `None` for unknown verbs (forward-compat: caller folds).
+#[must_use]
 pub fn translate_action(name: &str, params: &Value) -> Option<Action> {
     let to = params.get("to").and_then(Value::as_i64);
     match name {
@@ -53,6 +54,7 @@ pub fn translate_action(name: &str, params: &Value) -> Option<Action> {
 /// Clamp a requested raise-to into `[min_raise_to, max_raise_to]`, snapping to
 /// the all-in ceiling when the request overshoots (mirrors how live casinos
 /// treat over-raises; keeps every translated action engine-legal).
+#[must_use]
 fn clamp_raise_to(requested: i64, min_to: i64, max_to: i64) -> i64 {
     if requested >= max_to {
         max_to
@@ -63,6 +65,7 @@ fn clamp_raise_to(requested: i64, min_to: i64, max_to: i64) -> i64 {
 
 /// Turn a desired platform action into an engine action that is a member of
 /// `obs.legal` (the trait contract: `act` must return a legal action).
+#[must_use]
 pub fn make_legal(desired: Option<Action>, obs: &Observables<'_>) -> Action {
     let contains = |a: &Action| obs.legal.iter().any(|l| &l.action == a);
     if let Some(d) = desired {
@@ -489,6 +492,7 @@ impl ChamBrain {
 /// A preflop "call" facing only the BB ante is a limp → Bet{to: bb}; a "raise"
 /// preflop is a Raise{to}; postflop "bet" → Bet{to}, "raise" → Raise{to}.
 /// Sizes come from `params.to` when present; `make_legal` clamps them.
+#[must_use]
 fn classify_incoming(name: &str, params: &Value, preflop_first_entry: bool) -> Option<Action> {
     let to = params.get("to").and_then(Value::as_i64);
     match name {
@@ -515,6 +519,7 @@ fn classify_incoming(name: &str, params: &Value, preflop_first_entry: bool) -> O
 /// This is applied *before* the action is recorded to the shadow engine and
 /// sent to the platform, so both sides agree on the exact size — critical for
 /// keeping `turn_request.state.to_call` / `.pot` consistent across turns.
+#[must_use]
 fn clamp_engine_action(chosen: Action, params_hint: &Value) -> Action {
     let mn = params_hint.get("min").and_then(Value::as_i64);
     let mx = params_hint.get("max").and_then(Value::as_i64);
@@ -530,6 +535,7 @@ fn clamp_engine_action(chosen: Action, params_hint: &Value) -> Action {
 }
 
 /// Clamp `to` into `[mn, mx]`, flooring at 1 (a 0-chip bet is never legal).
+#[must_use]
 fn clamp_size(to: i64, mn: Option<i64>, mx: Option<i64>) -> i64 {
     match (mn, mx) {
         (Some(lo), Some(hi)) => to.clamp(lo.max(1), hi.max(lo.max(1))),
@@ -576,6 +582,7 @@ fn map_engine_to_platform(
 }
 
 /// Pick a platform verb, degrading gracefully if the server didn't offer it.
+#[must_use]
 fn pick_platform(want: &str, valid_actions: &[String]) -> (String, Value) {
     let empty = Value::Object(serde_json::Map::new());
     let order: &[&str] = match want {
@@ -596,6 +603,7 @@ fn pick_platform(want: &str, valid_actions: &[String]) -> (String, Value) {
 
 /// Trivial-policy reply (used when no artifacts are loaded): exact port of the
 /// reference `strategy.decide` + verb mapping.
+#[must_use]
 pub fn trivial_platform_reply(to_call: i64, pot: i64, valid_actions: &[String]) -> (String, Value) {
     let d = crate::strategy::decide(to_call, pot, valid_actions);
     (d.action, d.params)
