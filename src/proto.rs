@@ -9,13 +9,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Protocol version this client speaks (Layer-1 negotiation).
+/// Protocol versions this client advertises in the client `hello` frame.
+/// The platform selects one and echoes it in `selected_version`.
 pub const PROTOCOL_VERSIONS: [&str; 1] = ["1.0"];
+/// Human-readable client name sent in the client `hello` frame.
 pub const CLIENT_NAME: &str = "chipzen-extapi-rust";
+/// Client version sent in the client `hello` frame.
 pub const CLIENT_VERSION: &str = "0.1.0";
 
 /// Sentinel subprotocol marking the `cz_extbot_` token inside the
 /// `Sec-WebSocket-Protocol` offer (CZ issue 2932 — the token must never appear
 /// on a URL/query string, or it leaks into proxy access logs).
+/// Sentinel subprotocol name marking the `cz_extbot_` token inside the
+/// `Sec-WebSocket-Protocol` offer (CZ issue 2932 — never on a URL).
 pub const BOT_TOKEN_SUBPROTOCOL: &str = "chipzen-bot-token";
 
 /// Build the `Sec-WebSocket-Protocol` offer carrying the bot token:
@@ -32,6 +38,7 @@ pub struct Frame {
     /// (e.g. villain action notifications) without a schema break.
     #[serde(default)]
     pub raw: Value,
+    /// The frame's `type` discriminator (`turn_request`, `match_end`, ...).
     #[serde(default)]
     pub r#type: String,
     /// Lobby `hello`: which endpoint we landed on ("lobby").
@@ -39,31 +46,43 @@ pub struct Frame {
     pub endpoint: Option<String>,
     // ---- lobby `matched` notify ----
     #[serde(default)]
+    /// Match ID; present on `matched` and echoed in every match-leg frame.
     pub match_id: Option<String>,
     #[serde(default)]
+    /// Opaque participant ID assigned by the lobby for this match.
     pub participant_id: Option<String>,
     #[serde(default)]
+    /// Path (or absolute URL) of the per-match gateway WS endpoint.
     pub gateway_ws_url: Option<String>,
     #[serde(default)]
+    /// Whether the match counts toward a rating (informational).
     pub rated: Option<bool>,
     // ---- match server hello ----
     #[serde(default)]
+    /// Match `hello` payload: the protocol version the server selected.
     pub selected_version: Option<String>,
     #[serde(default)]
+    /// Match `hello` payload: e.g. `hu-nl` for heads-up no-limit.
     pub game_type: Option<String>,
     // ---- turn_request (Layer-2) ----
     #[serde(default)]
+    /// Turn reply correlation token; MUST be echoed verbatim in `turn_action`.
     pub request_id: Option<Value>,
     #[serde(default)]
+    /// The Layer-2 turn view (pot, to_call, raise bounds, board).
     pub state: Option<StateView>,
     #[serde(default)]
+    /// Legal verbs for the current turn; the reply must pick one of these.
     pub valid_actions: Vec<String>,
     // ---- action_rejected / error ----
     #[serde(default)]
+    /// `action_rejected` / `match_end` free-form reason string.
     pub reason: Option<String>,
     #[serde(default)]
+    /// `error` numeric/symbolic code.
     pub code: Option<String>,
     #[serde(default)]
+    /// `error` human-readable message.
     pub message: Option<String>,
     // ---- match_end ----
     /// Raw results array kept as JSON so we can echo it verbatim to stdout.
@@ -75,12 +94,16 @@ pub struct Frame {
 /// tolerant: absent → 0, matching the Python `_as_int` defensive coercion.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StateView {
+    /// Amount the hero must call to stay in the hand (0 → check is free).
     #[serde(default)]
     pub to_call: Value,
+    /// Current pot size, in the platform's smallest chip unit.
     #[serde(default)]
     pub pot: Value,
+    /// Minimum legal raise-to for this turn.
     #[serde(default)]
     pub min_raise: Value,
+    /// Maximum legal raise-to for this turn (typically the all-in ceiling).
     #[serde(default)]
     pub max_raise: Value,
     /// Public board cards (e.g. `["Ah","Kd","7c"]`); empty preflop. Tolerated
@@ -96,6 +119,8 @@ pub struct StateView {
 impl StateView {
     /// Coerce a possibly-missing / possibly-stringy numeric field to i64 (0 on
     /// failure) — port of Python `_as_int`.
+    /// Coerce a possibly-missing / possibly-stringy numeric JSON value to
+    /// `i64` (0 on failure) — port of the reference Python `_as_int`.
     pub fn as_int(v: &Value) -> i64 {
         match v {
             // Prefer i64; if the number is a u64 above i64::MAX (possible in
@@ -110,15 +135,19 @@ impl StateView {
         }
     }
 
+    /// Coerced `to_call` as `i64`; 0 if absent or unparseable.
     pub fn to_call(&self) -> i64 {
         Self::as_int(&self.to_call)
     }
+    /// Coerced `pot` as `i64`; 0 if absent or unparseable.
     pub fn pot(&self) -> i64 {
         Self::as_int(&self.pot)
     }
+    /// Coerced `min_raise` as `i64`; 0 if absent or unparseable.
     pub fn min_raise(&self) -> i64 {
         Self::as_int(&self.min_raise)
     }
+    /// Coerced `max_raise` as `i64`; 0 if absent or unparseable.
     pub fn max_raise(&self) -> i64 {
         Self::as_int(&self.max_raise)
     }
@@ -200,16 +229,45 @@ struct TurnActionOut<'a> {
     params: &'a Value,
 }
 
+/// Outbound wire frames. Every variant has an exact JSON shape (see the
+/// protocol doc §3–§6); unknown variants cannot be constructed.
 pub enum OutFrame<'a> {
-    AuthenticateLobby { token: &'a str },
-    AuthenticateMatch { match_id: &'a str },
-    ClientHello { match_id: &'a str },
-    PongLobby,
-    PongMatch { match_id: &'a str },
-    TurnAction {
+    /// Lobby leg, first frame: carries the real `cz_extbot_…` token.
+    AuthenticateLobby {
+        /// The API token.
+        token: &'a str,
+    },
+    /// Match leg, first frame: token is empty by protocol (the gateway's
+    /// internal JWT is authoritative), but the frame MUST still be sent first
+    /// or the Layer-1 handshake stalls.
+    AuthenticateMatch {
+        /// Match ID echoed back from `matched`.
         match_id: &'a str,
+    },
+    /// Match leg, third frame (after server `hello`): protocol version
+    /// negotiation.
+    ClientHello {
+        /// Match ID echoed back from `matched`.
+        match_id: &'a str,
+    },
+    /// Lobby heartbeat reply; no `match_id` in this variant's JSON.
+    PongLobby,
+    /// Match heartbeat reply; `match_id` is required.
+    PongMatch {
+        /// Match ID echoed back from `matched`.
+        match_id: &'a str,
+    },
+    /// Turn reply: echoes the `request_id` from the platform's
+    /// `turn_request`, plus the chosen verb and (for raises) the size.
+    TurnAction {
+        /// Match ID echoed back from `matched`.
+        match_id: &'a str,
+        /// The exact `request_id` received in the corresponding
+        /// `turn_request`, echoed verbatim.
         request_id: &'a Value,
+        /// The chosen verb (`fold` | `check` | `call` | `bet` | `raise`).
         action: &'a str,
+        /// Verb-specific parameters; empty for non-raise verbs.
         params: &'a Value,
     },
 }
