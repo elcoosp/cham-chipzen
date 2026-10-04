@@ -103,7 +103,8 @@ fn check_transport_security(url: &str) -> Result<(), Error> {
 }
 
 async fn send(ws: &mut Ws, frame: &OutFrame<'_>) -> Result<(), Error> {
-    ws.send(Message::Text(frame.to_json().into())).await?;
+    let text = frame.to_json()?;
+    ws.send(Message::Text(text.into())).await?;
     Ok(())
 }
 
@@ -165,7 +166,7 @@ pub async fn wait_for_matched(base_url: &str, bot_id: &str, token: &str) -> Resu
             other => debug!("lobby: ignoring frame type={other}"), // forward-compat
         }
     }
-    Err(Error::Connection(
+    Err(Error::Protocol(
         "lobby: connection closed before a 'matched' notification arrived".into(),
     ))
 }
@@ -206,7 +207,10 @@ pub async fn play_match(
             "match: expected server hello, got {:?}",
             server_hello.r#type
         );
-        return Ok(None);
+        return Err(Error::Protocol(format!(
+            "match: expected server hello, got type {:?}",
+            server_hello.r#type
+        )));
     }
     info!(
         "match: server hello version={:?} game_type={:?}",
@@ -464,12 +468,12 @@ pub async fn run_once(
     let gw_path = matched
         .gateway_ws_url
         .clone()
-        .ok_or_else(|| Error::Connection("matched frame lacks gateway_ws_url".into()))?;
+        .ok_or(Error::MissingField("gateway_ws_url"))?;
     let gateway_url = resolve_gateway_url(base_url, &gw_path)?;
     let match_id = matched
         .match_id
         .clone()
-        .ok_or_else(|| Error::Connection("matched frame lacks match_id".into()))?;
+        .ok_or(Error::MissingField("match_id"))?;
     play_match(&gateway_url, &match_id, token, brain).await
 }
 
