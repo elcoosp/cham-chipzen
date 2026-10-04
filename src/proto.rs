@@ -27,6 +27,7 @@ pub const BOT_TOKEN_SUBPROTOCOL: &str = "chipzen-bot-token";
 /// Build the `Sec-WebSocket-Protocol` offer carrying the bot token:
 /// `[sentinel, token]`. The api gateway extracts the token from this header
 /// and echoes the sentinel back on accept.
+#[must_use]
 pub fn bot_token_subprotocols(token: &str) -> Vec<String> {
     vec![BOT_TOKEN_SUBPROTOCOL.to_string(), token.to_string()]
 }
@@ -328,6 +329,7 @@ impl OutFrame<'_> {
 
 /// Parse a WS text frame into a `Frame`; malformed/non-object frames yield
 /// `None` (the reference client treats them as `{}` and ignores them).
+#[must_use]
 pub fn parse_frame(raw: &str) -> Option<Frame> {
     serde_json::from_str::<Value>(raw)
         .ok()
