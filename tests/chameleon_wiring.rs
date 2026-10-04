@@ -46,7 +46,7 @@ fn cham_brain_loads_from_bundle() {
          (train-buckets / train-bp / train-router) or set CHAM_ARTIFACT_DIR",
         dir.display()
     );
-    let brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7)
+    let brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7)
         .unwrap_or_else(|e| panic!("ChamBrain::load failed: {e}"));
     drop(brain);
 }
@@ -61,7 +61,7 @@ fn cham_brain_loads_from_bundle() {
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_on_match_end_closes_terminal_hand() {
     let dir = artifact_dir();
-    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
     let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
 
     // Play a preflop turn (brain will pick something legal), then have the
@@ -81,7 +81,7 @@ fn cham_brain_on_match_end_closes_terminal_hand() {
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_on_match_end_resets_for_next_match() {
     let dir = artifact_dir();
-    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
     let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
 
     // Play a turn, then simulate an unclean close (call on_match_end without
@@ -99,7 +99,7 @@ fn cham_brain_on_match_end_resets_for_next_match() {
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_postflop_degrades_to_trivial_policy() {
     let dir = artifact_dir();
-    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
     let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
     // Postflop turn: brain cannot bind a board, so should fall back to the
     // trivial policy rather than hard-fold. With to_call == 0 the trivial
@@ -114,7 +114,7 @@ fn cham_brain_postflop_degrades_to_trivial_policy() {
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_returns_legal_action_on_turn_request() {
     let dir = artifact_dir();
-    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
     let va: Vec<String> = vec!["fold".into(), "call".into(), "raise".into()];
     let (verb, _params) =
         brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
@@ -125,7 +125,7 @@ fn cham_brain_returns_legal_action_on_turn_request() {
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_advances_shadow_state_across_decisions() {
     let dir = artifact_dir();
-    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
 
     let va: Vec<String> = vec!["fold".into(), "call".into(), "raise".into()];
 
