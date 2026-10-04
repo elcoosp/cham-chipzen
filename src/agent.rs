@@ -79,10 +79,10 @@ pub fn make_legal(desired: Option<Action>, obs: &Observables<'_>) -> Action {
             }),
             other => Some(other),
         };
-        if let Some(s) = sized {
-            if contains(&s) {
-                return s;
-            }
+        if let Some(s) = sized
+            && contains(&s)
+        {
+            return s;
         }
     }
     // Guaranteed-legal fallback ladder: check, call, fold.
@@ -397,6 +397,44 @@ impl ChamBrain {
         self.hand_idx += 1;
         self.hero_seat = 1 - self.hero_seat;
         self.state = None;
+        self.opp_acted_this_street = false;
+        self.hand_tainted = false;
+    }
+
+    /// Notify the brain that the platform signalled a fresh hand within the
+    /// same match (`round_start` / `hand_start` / `deal` frames).
+    ///
+    /// Without this, a hand that ended without us observing the terminal
+    /// action (e.g. the platform did not deliver the villain's fold frame)
+    /// would leave the shadow mid-hand when the next hand begins, causing the
+    /// new hand's first `turn_request` to hit the actor-mismatch guard and
+    /// silently degrade to the trivial policy — and, worse, the shadow's
+    /// `hand_idx` would never advance, so every "new" hand would reuse the
+    /// same RNG seed.
+    ///
+    /// Behaviour mirrors `on_match_end`:
+    ///  * If the shadow state is terminal, feed the completed hand to the
+    ///    tracker via `finish_hand` (advancing `hand_idx` and flipping the
+    ///    seat).
+    ///  * If it is not terminal, the previous hand ended without us seeing
+    ///    its terminal action — skip the tracker update but still advance
+    ///    `hand_idx` and flip the seat so the new hand begins cleanly.
+    pub fn note_new_hand(&mut self) {
+        if let Some(state) = self.state.take() {
+            if state.is_terminal() {
+                // Restore state briefly so finish_hand can read it.
+                self.state = Some(state);
+                self.finish_hand();
+            } else {
+                info!(
+                    hand_idx = self.hand_idx,
+                    "new hand signalled mid-hand: previous hand not observed to completion, skipping tracker"
+                );
+                self.hand_idx += 1;
+                self.hero_seat = 1 - self.hero_seat;
+            }
+        }
+        self.log.clear();
         self.opp_acted_this_street = false;
         self.hand_tainted = false;
     }
