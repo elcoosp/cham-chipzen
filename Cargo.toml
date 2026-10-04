@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.98"
 description = "Chipzen External-API poker bot driven by the CHAMELEON HUNL agent (Rust port of the chipzen-sdk external-api-bot reference)"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/elcoosp/cham-chipzen"
+homepage = "https://github.com/elcoosp/cham-chipzen"
+documentation = "https://docs.rs/cham-chipzen"
+keywords = ["poker", "chipzen", "hulhe", "bot", "chameleon"]
+categories = ["games", "network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -30,3 +36,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"]
 
 [profile.release]
 opt-level = 3
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Do not panic on unreachable branches silently; require explicit intent.
+# `expect_used` is *not* enforced because `Frame::raw` defaults and
+# test-only code legitimately unwrap.
