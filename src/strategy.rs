@@ -77,3 +77,56 @@ pub fn rejection_fallback(valid_actions: &[String]) -> Decision {
         Decision::simple("fold")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn va(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn check_when_free() {
+        assert_eq!(decide(0, 100, &va(&["check", "bet", "fold"])).action, "check");
+    }
+
+    #[test]
+    fn call_when_cheap() {
+        assert_eq!(decide(50, 100, &va(&["call", "raise", "fold"])).action, "call");
+    }
+
+    #[test]
+    fn fold_when_expensive() {
+        assert_eq!(decide(80, 100, &va(&["call", "raise", "fold"])).action, "fold");
+    }
+
+    #[test]
+    fn zero_pot_nonzero_to_call_folds() {
+        assert_eq!(decide(50, 0, &va(&["call", "fold"])).action, "fold");
+    }
+
+    #[test]
+    fn falls_back_to_check_when_no_fold() {
+        assert_eq!(decide(80, 100, &va(&["check", "call"])).action, "check");
+    }
+
+    #[test]
+    fn empty_valid_actions_returns_fold() {
+        assert_eq!(decide(80, 100, &[]).action, "fold");
+    }
+
+    #[test]
+    fn rejection_fallback_prefers_check_then_fold() {
+        assert_eq!(rejection_fallback(&va(&["check", "fold"])).action, "check");
+        assert_eq!(rejection_fallback(&va(&["fold", "call"])).action, "fold");
+        assert_eq!(rejection_fallback(&[]).action, "check");
+    }
+
+    #[test]
+    fn decision_params_are_empty_object() {
+        let d = decide(0, 100, &va(&["check"]));
+        assert!(d.params.is_object());
+        assert!(d.params.as_object().unwrap().is_empty());
+    }
+}
