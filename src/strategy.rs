@@ -9,7 +9,9 @@ use serde_json::{Map, Value};
 /// non-raise actions, so callers can splat it into a `turn_action` frame).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
+    /// The chosen verb (`fold` | `check` | `call` | `bet` | `raise`).
     pub action: String,
+    /// Verb-specific parameters (`{to: N}` for raises, `{}` otherwise).
     pub params: Value,
 }
 
