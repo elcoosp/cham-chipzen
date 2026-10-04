@@ -184,6 +184,102 @@ async fn spawn_match_server() -> (String, tokio::task::JoinHandle<Vec<Value>>) {
     (url, handle)
 }
 
+/// Like `spawn_match_server` but rejects the first `turn_action` with
+/// `action_rejected` and then expects a retry with the SAME `request_id`.
+/// After the retry, sends `match_end`. This exercises the rejection-fallback
+/// path end-to-end (`strategy::rejection_fallback` + the brain's
+/// `note_action_rejected`).
+async fn spawn_match_server_with_rejection() -> (String, tokio::task::JoinHandle<Vec<Value>>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{addr}/ws/external/match/m-test/p-test");
+
+    let handle = tokio::spawn(async move {
+        let mut received: Vec<Value> = Vec::new();
+
+        let Ok((stream, _)) = listener.accept().await else {
+            return received;
+        };
+        let Ok(mut ws) = accept_with_subprotocol_echo(stream).await else {
+            return received;
+        };
+
+        // authenticate
+        if let Some(t) = next_text(&mut ws).await
+            && let Ok(v) = serde_json::from_str::<Value>(&t)
+        {
+            received.push(v);
+        }
+        // server hello
+        send_json(
+            &mut ws,
+            json!({"type": "hello", "selected_version": "1.0", "game_type": "hu-nl"}),
+        )
+        .await;
+        // client hello
+        if let Some(t) = next_text(&mut ws).await
+            && let Ok(v) = serde_json::from_str::<Value>(&t)
+        {
+            received.push(v);
+        }
+        // turn_request
+        send_json(
+            &mut ws,
+            json!({
+                "type": "turn_request",
+                "request_id": 99,
+                "state": {
+                    "to_call": 100,
+                    "pot": 150,
+                    "street": "preflop"
+                },
+                "valid_actions": ["fold", "call", "raise"]
+            }),
+        )
+        .await;
+        // first turn_action (should be rejected)
+        if let Some(t) = next_text(&mut ws).await
+            && let Ok(v) = serde_json::from_str::<Value>(&t)
+        {
+            received.push(v);
+        }
+        // action_rejected with the same request_id and a narrow valid set
+        send_json(
+            &mut ws,
+            json!({
+                "type": "action_rejected",
+                "request_id": 99,
+                "reason": "illegal_action",
+                "valid_actions": ["fold", "check"]
+            }),
+        )
+        .await;
+        // retry turn_action
+        if let Some(t) = next_text(&mut ws).await
+            && let Ok(v) = serde_json::from_str::<Value>(&t)
+        {
+            received.push(v);
+        }
+        // match_end
+        send_json(
+            &mut ws,
+            json!({"type": "match_end", "reason": "normal", "results": [1, -1]}),
+        )
+        .await;
+
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        received
+    });
+
+    (url, handle)
+}
+
 /// Full flow with no brain (trivial reference policy).
 ///
 /// The `turn_request` we send is a preflop spot where the trivial policy
@@ -226,3 +322,43 @@ async fn end_to_end_lobby_and_match_without_brain() {
     assert_eq!(received[2]["action"], "fold");
     assert!(received[2]["params"].is_object());
 }
+
+/// Same lobby + handshake plumbing as the happy path, but the match server
+/// rejects the first `turn_action`. The client must retry with the SAME
+/// `request_id` using a guaranteed-legal fallback verb from the rejection's
+/// `valid_actions` (in this case `fold` or `check`), and then the match
+/// closes cleanly.
+#[tokio::test]
+async fn end_to_end_action_rejected_retry_same_request_id() {
+    let (match_url, match_handle) = spawn_match_server_with_rejection().await;
+    let lobby_url = spawn_lobby_server("test-bot", match_url).await;
+    let base = lobby_url
+        .split("/ws/external")
+        .next()
+        .expect("lobby url has origin")
+        .to_string();
+
+    let end = cham_chipzen::client::run_once(&base, "test-bot", "cz_extbot_test", None)
+        .await
+        .expect("run_once should succeed")
+        .expect("match_end should be produced");
+    assert_eq!(end.r#type, "match_end");
+
+    let received = match_handle.await.expect("match server task");
+
+    // Frames: authenticate, hello, first turn_action, retry turn_action.
+    assert_eq!(received.len(), 4, "frames: {received:#?}");
+    assert_eq!(received[2]["type"], "turn_action");
+    assert_eq!(received[2]["request_id"], 99);
+    assert_eq!(received[3]["type"], "turn_action");
+    // Critical: retry MUST echo the same request_id (protocol contract).
+    assert_eq!(received[3]["request_id"], 99);
+    // And it MUST be one of the fallback verbs offered by the rejection.
+    let retry_action = received[3]["action"].as_str().unwrap_or("");
+    assert!(
+        retry_action == "fold" || retry_action == "check",
+        "retry action was {retry_action:?}, not in the rejection's valid_actions"
+    );
+    assert!(received[3]["params"].is_object());
+}
+
