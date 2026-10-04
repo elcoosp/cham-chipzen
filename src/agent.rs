@@ -11,9 +11,10 @@
 //!   The opponent's action string ("call" facing the BB ante = limp; "raise"
 //!   with `params.to` = 3-bet) drives `State::apply` through legal-action
 //!   translation.
-//! * Postflop: the platform exposes no board in the turn_request subset we can
-//!   rely on, so we fold (the honest default for an unknown-spot blueprint
-//!   agent) — recorded as a limitation in the README.
+//! * Postflop: the platform does not expose a board we can bind into the
+//!   shadow engine, so the blueprint agent cannot run. We degrade to the
+//!   trivial check/call/fold reference policy (never a fixed fold — that
+//!   would auto-lose the pot) and log the limitation once per turn.
 //!
 //! Every decision goes through `ChameleonAgent::act` on a real `Observables`
 //! view, keeping tracker/weights/action-seq state consistent across hands, and
@@ -233,6 +234,7 @@ impl ChamBrain {
         &mut self,
         to_call: i64,
         pot: i64,
+        platform_street: &str,
         valid_actions: &[String],
         params_hint: &Value,
     ) -> (String, Value) {
@@ -245,14 +247,33 @@ impl ChamBrain {
             self.finish_hand();
             self.start_hand();
         }
+        // Postflop: the External API does not currently expose a board we can
+        // bind into the shadow engine (see README limitations), so we cannot
+        // run the blueprint agent here. Degrade to the trivial check/call/fold
+        // policy rather than hard-folding, which auto-loses the pot — this
+        // keeps the protocol path playable and losing strictly less than a
+        // fixed fold.
+        if platform_street != "preflop" {
+            info!(
+                street = platform_street,
+                "postflop: no bindable board, using trivial reference policy"
+            );
+            return trivial_platform_reply(to_call, pot, valid_actions);
+        }
         let state = match self.state.as_mut() {
             Some(s) => s,
             None => return trivial_platform_reply(to_call, pot, valid_actions),
         };
         if state.street() != Street::Preflop {
-            // No board visibility on the external API → honest fold postflop.
-            warn!("postflop turn without board data: folding (see README limitations)");
-            return pick_platform("fold", valid_actions);
+            // Shadow state advanced past preflop while the platform says we
+            // are preflop → the shadow is out of sync. Rebuild it and fall
+            // back rather than trust a stale state.
+            warn!(
+                shadow = ?state.street(),
+                "shadow state street mismatch; rebuilding and using trivial policy"
+            );
+            self.start_hand();
+            return trivial_platform_reply(to_call, pot, valid_actions);
         }
         let seat = state.to_act();
         if seat != self.hero_seat {
@@ -307,16 +328,16 @@ impl ChamBrain {
     }
 
     /// Handle a clean `match_end`: close out any unfinished hand bookkeeping.
+    ///
+    /// Seat alternation is a *within-match* invariant (HU deals alternate
+    /// SB/BB every hand). A match that ends mid-hand has not completed that
+    /// hand, so we must NOT flip the seat or advance `hand_idx` — the next
+    /// match begins a fresh hand from the current seat, keeping the shadow
+    /// state's hand-index cursor monotone across reconnects.
     pub fn on_match_end(&mut self) {
-        if let Some(state) = self.state.take() {
-            if !state.is_terminal() {
-                // Match cut short mid-hand: no reliable payoff; skip tracker
-                // update rather than poison it with a fabricated history.
-                self.hand_idx += 1;
-                self.hero_seat = 1 - self.hero_seat;
-            }
-        }
+        self.state = None;
         self.log.clear();
+        self.opp_acted_this_street = false;
     }
 }
 
@@ -348,7 +369,7 @@ fn classify_incoming(name: &str, params: &Value, preflop_first_entry: bool) -> O
 fn map_engine_to_platform(
     chosen: Action,
     valid_actions: &[String],
-    _params_hint: &Value,
+    params_hint: &Value,
 ) -> (String, Value) {
     let has = |v: &str| valid_actions.iter().any(|a| a == v);
     match chosen {
@@ -360,8 +381,20 @@ fn map_engine_to_platform(
             if verb == "call" {
                 return pick_platform("call", valid_actions);
             }
+            // Clamp `to` into the platform's advertised raise bounds when
+            // present (server-provided `min_raise` / `max_raise`). When the
+            // hint is absent (older server, or non-raise spot) we trust the
+            // engine's own legality clamp already applied upstream.
+            let mn = params_hint.get("min").and_then(Value::as_i64);
+            let mx = params_hint.get("max").and_then(Value::as_i64);
+            let adjusted = match (mn, mx) {
+                (Some(lo), Some(hi)) => to.clamp(lo.max(1), hi.max(lo.max(1))),
+                (Some(lo), None) => to.max(lo.max(1)),
+                (None, Some(hi)) => to.min(hi.max(1)),
+                (None, None) => to,
+            };
             let mut m = serde_json::Map::new();
-            m.insert("to".into(), Value::Number(to.into()));
+            m.insert("to".into(), Value::Number(adjusted.into()));
             (verb.to_string(), Value::Object(m))
         }
     }
@@ -393,3 +426,152 @@ pub fn trivial_platform_reply(to_call: i64, pot: i64, valid_actions: &[String]) 
     (d.action, d.params)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn translate_action_covers_all_verbs() {
+        assert_eq!(translate_action("fold", &json!({})), Some(Action::Fold));
+        assert_eq!(translate_action("check", &json!({})), Some(Action::Check));
+        assert_eq!(translate_action("call", &json!({})), Some(Action::Call));
+        assert_eq!(translate_action("bet", &json!({"to": 500})), Some(Action::Bet { to: 500 }));
+        assert_eq!(translate_action("raise", &json!({"to": 1200})), Some(Action::Raise { to: 1200 }));
+    }
+
+    #[test]
+    fn translate_action_rejects_unknown_and_missing_size() {
+        assert_eq!(translate_action("allin", &json!({"to": 9999})), None);
+        assert_eq!(translate_action("bet", &json!({})), None);
+        assert_eq!(translate_action("raise", &json!({})), None);
+    }
+
+    #[test]
+    fn clamp_raise_to_snaps_overshoot_to_max() {
+        assert_eq!(clamp_raise_to(5000, 100, 3000), 3000);
+        assert_eq!(clamp_raise_to(5000, 100, 5000), 5000);
+    }
+
+    #[test]
+    fn clamp_raise_to_raises_below_min() {
+        assert_eq!(clamp_raise_to(50, 100, 3000), 100);
+        assert_eq!(clamp_raise_to(200, 100, 3000), 200);
+    }
+
+    #[test]
+    fn classify_incoming_treats_preflop_call_as_limp() {
+        assert_eq!(
+            classify_incoming("call", &json!({"to": 100}), true),
+            Some(Action::Bet { to: 100 })
+        );
+        assert_eq!(
+            classify_incoming("call", &json!({"to": 100}), false),
+            Some(Action::Call)
+        );
+    }
+
+    #[test]
+    fn classify_incoming_bet_and_raise_carry_size() {
+        assert_eq!(
+            classify_incoming("raise", &json!({"to": 600}), false),
+            Some(Action::Raise { to: 600 })
+        );
+        assert_eq!(
+            classify_incoming("bet", &json!({"to": 400}), false),
+            Some(Action::Bet { to: 400 })
+        );
+    }
+
+    #[test]
+    fn classify_incoming_unknown_yields_none() {
+        assert_eq!(classify_incoming("gibberish", &json!({}), false), None);
+    }
+
+    #[test]
+    fn map_engine_to_platform_prefers_raise_when_offered() {
+        let va: Vec<String> = vec!["fold".into(), "call".into(), "raise".into()];
+        let (verb, params) = map_engine_to_platform(Action::Raise { to: 900 }, &va, &Value::Null);
+        assert_eq!(verb, "raise");
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(900));
+    }
+
+    #[test]
+    fn map_engine_to_platform_clamps_raise_to_hint_bounds() {
+        let va: Vec<String> = vec!["fold".into(), "call".into(), "raise".into()];
+        let hint = json!({"min": 300, "max": 1500});
+        let (_, params) = map_engine_to_platform(Action::Raise { to: 9999 }, &va, &hint);
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(1500));
+        let (_, params) = map_engine_to_platform(Action::Raise { to: 50 }, &va, &hint);
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(300));
+        let (_, params) = map_engine_to_platform(Action::Raise { to: 800 }, &va, &hint);
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(800));
+    }
+
+    #[test]
+    fn map_engine_to_platform_only_min_or_only_max() {
+        let va: Vec<String> = vec!["fold".into(), "call".into(), "raise".into()];
+        let (_, params) = map_engine_to_platform(
+            Action::Raise { to: 9999 },
+            &va,
+            &json!({"max": 2000}),
+        );
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(2000));
+        let (_, params) = map_engine_to_platform(
+            Action::Raise { to: 50 },
+            &va,
+            &json!({"min": 400}),
+        );
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(400));
+    }
+
+    #[test]
+    fn map_engine_to_platform_degrades_raise_to_bet() {
+        let va: Vec<String> = vec!["fold".into(), "call".into(), "bet".into()];
+        let (verb, params) = map_engine_to_platform(Action::Raise { to: 900 }, &va, &Value::Null);
+        assert_eq!(verb, "bet");
+        assert_eq!(params.get("to").and_then(Value::as_i64), Some(900));
+    }
+
+    #[test]
+    fn map_engine_to_platform_degrades_raise_to_call() {
+        let va: Vec<String> = vec!["fold".into(), "call".into()];
+        let (verb, _) = map_engine_to_platform(Action::Raise { to: 900 }, &va, &Value::Null);
+        assert_eq!(verb, "call");
+    }
+
+    #[test]
+    fn map_engine_to_platform_simple_actions_pass_through() {
+        let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
+        assert_eq!(map_engine_to_platform(Action::Fold, &va, &Value::Null).0, "fold");
+        assert_eq!(map_engine_to_platform(Action::Check, &va, &Value::Null).0, "check");
+        assert_eq!(map_engine_to_platform(Action::Call, &va, &Value::Null).0, "call");
+    }
+
+    #[test]
+    fn pick_platform_prefers_wanted_then_degrades() {
+        let va: Vec<String> = vec!["fold".into(), "call".into()];
+        assert_eq!(pick_platform("check", &va).0, "call");
+        assert_eq!(pick_platform("call", &va).0, "call");
+        assert_eq!(pick_platform("fold", &va).0, "fold");
+    }
+
+    #[test]
+    fn pick_platform_empty_falls_back_to_fold() {
+        assert_eq!(pick_platform("check", &[]).0, "fold");
+    }
+
+    #[test]
+    fn decide_turn_postflop_uses_trivial_policy_not_fixed_fold() {
+        // Cannot construct a full ChamBrain without artifacts, so exercise the
+        // trivial-policy reply that decide_turn delegates to postflop.
+        let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
+        // Free to check → trivial policy checks (not folds).
+        assert_eq!(trivial_platform_reply(0, 150, &va).0, "check");
+        // Cheap call → trivial policy calls.
+        assert_eq!(trivial_platform_reply(50, 150, &va).0, "call");
+        // Expensive → trivial policy folds.
+        assert_eq!(trivial_platform_reply(200, 150, &va).0, "fold");
+    }
+}
