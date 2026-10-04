@@ -10,6 +10,12 @@
 
 use thiserror::Error;
 
+/// Top-level error type for every fallible operation in the crate.
+///
+/// The variants split along the axis that matters for recovery: transport
+/// failures ([`Error::Ws`], [`Error::Io`]) are retryable in `--loop` mode,
+/// while protocol failures ([`Error::Protocol`], [`Error::MissingField`],
+/// [`Error::Serialization`]) are fatal and would loop forever if retried.
 #[derive(Debug, Error)]
 pub enum Error {
     /// Transport-level failure from the WebSocket stack.
