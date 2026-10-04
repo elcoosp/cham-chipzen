@@ -112,8 +112,6 @@ pub struct ChamBrain {
     hero_seat: usize,
     hand_idx: u64,
     log: Vec<(Street, Player, Action)>,
-    last_action_name: String,
-    last_params: Value,
     /// True once the opponent acted before us this street (needed to tell a
     /// preflop "call" (limp) from a post-raise call, and bet vs raise).
     opp_acted_this_street: bool,
@@ -162,8 +160,6 @@ impl ChamBrain {
             hero_seat: 0,
             hand_idx: 0,
             log: Vec::new(),
-            last_action_name: String::new(),
-            last_params: Value::Null,
             opp_acted_this_street: false,
         })
     }
@@ -178,8 +174,6 @@ impl ChamBrain {
                 self.state = Some(state);
                 self.log.clear();
                 self.opp_acted_this_street = false;
-                self.last_action_name.clear();
-                self.last_params = Value::Null;
             }
             Err(e) => warn!("shadow state init failed: {e}"),
         }
@@ -216,8 +210,6 @@ impl ChamBrain {
         if state.apply(action).is_err() {
             warn!("villain action {name} rejected by shadow engine; folding next turn");
         }
-        self.last_action_name = name.to_string();
-        self.last_params = params.clone();
         self.opp_acted_this_street = true;
     }
 
@@ -277,9 +269,22 @@ impl ChamBrain {
         }
         let seat = state.to_act();
         if seat != self.hero_seat {
-            // Defensive: shouldn't happen with well-formed turn_requests —
-            // villain still owes an action in our shadow.
-            warn!("turn_request while villain to act in shadow state");
+            // The shadow state says it is the *villain's* turn, but the
+            // platform just handed *us* a `turn_request`. That means the
+            // shadow and the platform disagree about whose action is owed —
+            // likely because we did not see the villain's last public action
+            // (the External API does not guarantee delivery of those frames).
+            //
+            // Emitting a blueprint action for the wrong seat would be illegal
+            // in the shadow and, worse, semantically wrong (the agent's
+            // distribution assumes *it* is the actor). Degrade to the trivial
+            // reference policy and rebuild the shadow next hand.
+            warn!(
+                shadow_to_act = seat,
+                hero_seat = self.hero_seat,
+                "shadow/platform actor mismatch: using trivial policy this turn"
+            );
+            return trivial_platform_reply(to_call, pot, valid_actions);
         }
         let player = Player::from_usize(self.hero_seat);
         // Our intent: mirror the chameleon distribution on the *preflop* spot.
