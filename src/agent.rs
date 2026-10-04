@@ -138,10 +138,28 @@ impl ChamBrain {
             },
             fallback_mode: std::env::var("CHAM_FALLBACK_MODE").unwrap_or_else(|_| "renorm".into()),
         };
-        let router = match std::fs::read(bundle_dir.join("router.bin")) {
-            Ok(bytes) => RouterRuntime::from_model_bytes(&bytes)
-                .map_err(|e| format!("router model: {e}"))?,
-            Err(_) => RouterRuntime::new(SoftmaxModel::new(20, 4), 0.7, 8.0, 0.5, -1.5),
+        // The router model lives inside the bundle. If it is missing (or
+        // fails to parse), we degrade to a *uniform* router — every expert
+        // gets equal weight. This is a real behavioural change, so it is
+        // logged loudly at WARN level: a silent fallback here would let the
+        // bot run for weeks on an untrained router without anyone noticing.
+        let router_path = bundle_dir.join("router.bin");
+        let router = match std::fs::read(&router_path) {
+            Ok(bytes) => {
+                info!(path = %router_path.display(), "router model loaded");
+                RouterRuntime::from_model_bytes(&bytes)
+                    .map_err(|e| format!("router model {}: {e}", router_path.display()))?
+            }
+            Err(e) => {
+                warn!(
+                    path = %router_path.display(),
+                    error = %e,
+                    "router model not loadable; falling back to UNIFORM router \
+                     (all experts equally weighted). The agent's per-hand routing \
+                     will not reflect any training."
+                );
+                RouterRuntime::new(SoftmaxModel::new(20, 4), 0.7, 8.0, 0.5, -1.5)
+            }
         };
         let agent = ChameleonAgent::new(
             mode,
