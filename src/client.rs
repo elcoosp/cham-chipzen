@@ -223,7 +223,15 @@ pub async fn play_match(
             return Ok(Some(end));
         }
     }
-    info!("match: connection closed without a match_end");
+    // The socket closed without a clean match_end (network drop, server
+    // restart, or protocol violation). The shadow state may be mid-hand; we
+    // MUST reset it so it does not leak into the next match's first
+    // turn_request. `on_match_end` handles both terminal and non-terminal
+    // states idempotently.
+    if let Some(b) = &brain {
+        b.lock().await.on_match_end();
+    }
+    info!("match: connection closed without a match_end; brain shadow reset");
     Ok(None)
 }
 
@@ -394,19 +402,30 @@ async fn decide_action(
     let hint = serde_json::Value::Object(hint_map);
     match brain {
         Some(b) => {
-            let b = b.clone();
+            // Clone the Arc for the blocking pool; keep `b` (the outer ref)
+            // so we can still reach the brain on the panic path.
+            let bc = b.clone();
             let va = valid_actions.to_vec();
             let (to_call, pot) = (state.to_call(), state.pot());
             let street = state.street_name();
             let result = tokio::task::spawn_blocking(move || {
-                b.blocking_lock()
+                bc.blocking_lock()
                     .decide_turn(to_call, pot, &street, &va, &hint)
             })
             .await;
             match result {
                 Ok(pair) => pair,
                 Err(e) => {
-                    warn!("brain panicked on decision ({e}); falling back to trivial policy");
+                    warn!(
+                        "brain panicked on decision ({e}); tainting hand and \
+                         falling back to trivial policy"
+                    );
+                    // The panic unwound out of `decide_turn`, so the brain's
+                    // shadow state may be half-mutated. Taint the hand so the
+                    // next turn uses the trivial policy and the tracker skips
+                    // this hand. `note_action_rejected` does not require the
+                    // brain to be in a consistent state to be safe to call.
+                    b.lock().await.note_action_rejected();
                     let d = strategy::decide(state.to_call(), state.pot(), valid_actions);
                     (d.action, d.params)
                 }
