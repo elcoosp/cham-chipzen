@@ -360,7 +360,18 @@ impl ChamBrain {
     /// hand, so we must NOT flip the seat or advance `hand_idx` — the next
     /// match begins a fresh hand from the current seat, keeping the shadow
     /// state's hand-index cursor monotone across reconnects.
+    ///
+    /// If, however, the shadow state *is* terminal when match_end arrives
+    /// (e.g., the villain's final fold/call ended the hand and the platform
+    /// then closed the match), we must still feed that completed hand to the
+    /// tracker via `finish_hand` — otherwise the last hand of every match
+    /// silently never reaches `ChameleonAgent::on_hand_end`, degrading the
+    /// tracker's running statistics at every match boundary.
     pub fn on_match_end(&mut self) {
+        let terminal = self.state.as_ref().is_some_and(|s| s.is_terminal());
+        if terminal {
+            self.finish_hand();
+        }
         self.state = None;
         self.log.clear();
         self.opp_acted_this_street = false;
@@ -657,6 +668,18 @@ mod tests {
         assert_eq!(clamp_size(0, Some(0), Some(0)), 1);
         assert_eq!(clamp_size(-5, None, None), -5);
         assert_eq!(clamp_size(50, Some(0), Some(0)), 1);
+    }
+
+    #[test]
+    fn classify_incoming_call_preflop_and_postflop_differ() {
+        // Sanity: a preflop `call` is a limp (Bet-to); the same verb postflop
+        // is a plain Call. This distinction is what lets the shadow state tell
+        // "villain limped" from "villain called a raise".
+        let pre = classify_incoming("call", &json!({"to": 100}), true);
+        let post = classify_incoming("call", &json!({"to": 100}), false);
+        assert_ne!(pre, post);
+        assert_eq!(pre, Some(Action::Bet { to: 100 }));
+        assert_eq!(post, Some(Action::Call));
     }
 
     #[test]

@@ -51,6 +51,28 @@ fn cham_brain_loads_from_bundle() {
     drop(brain);
 }
 
+/// When `on_match_end` fires and the shadow state is *terminal* (the hand
+/// completed in our shadow but the match ended immediately after), the brain
+/// must still feed that hand to the tracker via `ChameleonAgent::on_hand_end`.
+/// If it does not, every match silently drops its final hand from the
+/// running statistics — a slow, invisible learning leak that this test is
+/// designed to catch once an artifact bundle is available.
+#[test]
+#[ignore = "requires a Chameleon artifact bundle"]
+fn cham_brain_on_match_end_closes_terminal_hand() {
+    let dir = artifact_dir();
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
+
+    // Play a preflop turn (brain will pick something legal), then have the
+    // villain fold in the shadow so the state reaches terminal, then signal
+    // match_end. The tracker must absorb the hand without panicking.
+    let (_verb, _params) =
+        brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
+    brain.observe_opponent_action("fold", &serde_json::Value::Null);
+    brain.on_match_end();
+}
+
 #[test]
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_postflop_degrades_to_trivial_policy() {
