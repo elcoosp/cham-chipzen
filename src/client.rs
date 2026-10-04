@@ -264,7 +264,7 @@ pub async fn handle_match_message(
             Ok(None)
         }
         "turn_request" => {
-            let state = msg.state.clone().unwrap_or(StateView::default());
+            let state = msg.state.clone().unwrap_or_default();
             let (action, params) = decide_action(brain, state, &msg.valid_actions).await;
             debug!("turn_request -> {action} {params}");
             send(
@@ -322,15 +322,15 @@ pub async fn handle_match_message(
         // `turn_result` is likewise ambiguous (round summary vs. per-actor
         // notification); we log it for observability but do not ingest.
         "opponent_action" => {
-            if let Some(b) = brain {
-                if let Some(name) = extract_action_name(&msg.raw) {
-                    let params = msg
-                        .raw
-                        .get("params")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    b.lock().await.observe_opponent_action(&name, &params);
-                }
+            if let Some(b) = brain
+                && let Some(name) = extract_action_name(&msg.raw)
+            {
+                let params = msg
+                    .raw
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                b.lock().await.observe_opponent_action(&name, &params);
             }
             Ok(None)
         }
