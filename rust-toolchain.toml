@@ -1,0 +1,6 @@
+# Pin the toolchain so CI and local dev build against the same rustc.
+# Bump together with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
