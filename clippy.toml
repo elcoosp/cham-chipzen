@@ -1,0 +1,4 @@
+# Prefer explicit `.to_owned()` over `.to_string()` only for &String inputs;
+# for &str inputs `.to_string()` is idiomatic and clippy should not warn.
+# (This block documents the choice; no key is set to disable the lint, since
+# our codebase uses `.to_string()` intentionally on &str.)
