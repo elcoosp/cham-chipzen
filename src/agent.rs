@@ -310,7 +310,17 @@ impl ChamBrain {
         // (Villain context is already applied to the shadow state; the agent's
         // canonical ActionSeq was fed via on_public_action in observe_*.)
         let obs = Observables::view(state, player);
-        let mut rng = child(self.seed, &format!("chipzen-decide{}-{}", self.hand_idx, pot));
+        // Incorporate a monotone decision sequence (`log.len()`) in addition
+        // to (hand_idx, pot). Within a single hand the log grows on every
+        // applied action, so even if the pot happens to repeat (e.g. a
+        // check-check), the RNG streams remain distinct per decision. Without
+        // this, two same-pot turns inside one hand would draw the identical
+        // sampled action from the agent.
+        let decision_seq = self.log.len();
+        let mut rng = child(
+            self.seed,
+            &format!("chipzen-decide{}-{}-{}", self.hand_idx, decision_seq, pot),
+        );
         let chosen = self.agent.act(&obs, &mut rng);
         // Clamp the engine action to the *platform's* advertised raise bounds
         // BEFORE applying it to the shadow state. This keeps the shadow state
