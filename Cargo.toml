@@ -1,8 +1,8 @@
 [package]
 name = "cham-chipzen"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.98"
 description = "Chipzen External-API poker bot driven by the CHAMELEON HUNL agent (Rust port of the chipzen-sdk external-api-bot reference)"
 license = "MIT"
 
