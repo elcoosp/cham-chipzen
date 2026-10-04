@@ -52,7 +52,7 @@ struct Args {
     depth_bb: i64,
 
     /// Deterministic seed for hole sampling / decision draws per match.
-    #[arg(long, default_value_t = 0xCE41_3E7)]
+    #[arg(long, default_value_t = 0x0CE4_13E7)]
     seed: u64,
 
     /// Enable debug logging (or set RUST_LOG).
