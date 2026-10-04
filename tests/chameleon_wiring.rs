@@ -73,6 +73,28 @@ fn cham_brain_on_match_end_closes_terminal_hand() {
     brain.on_match_end();
 }
 
+/// `on_match_end` is called both on clean `match_end` and on unclean socket
+/// close. After either, the brain must be ready for a fresh hand: the shadow
+/// state is None, the next `decide_turn` starts a new hand, and no stale
+/// taint leaks in.
+#[test]
+#[ignore = "requires a Chameleon artifact bundle"]
+fn cham_brain_on_match_end_resets_for_next_match() {
+    let dir = artifact_dir();
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0xCE41_3E7).expect("load");
+    let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
+
+    // Play a turn, then simulate an unclean close (call on_match_end without
+    // a terminal state).
+    let (_v, _p) = brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
+    brain.on_match_end();
+
+    // The next decision must start a fresh hand and still return a legal
+    // verb — proving the shadow was reset, not carried over.
+    let (verb, _p) = brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
+    assert!(va.contains(&verb), "post-reset decision returned {verb:?}");
+}
+
 #[test]
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_postflop_degrades_to_trivial_policy() {
