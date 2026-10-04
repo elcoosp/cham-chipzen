@@ -28,7 +28,7 @@ use cham_core::{
         Action, State, Street,
     },
     obs::{Agent, Observables, Player},
-    rng::{child, rng_from_seed, Rng},
+    rng::child,
     EngineConfig,
 };
 use cham_router::{model::SoftmaxModel, runtime::RouterRuntime};
@@ -101,8 +101,6 @@ pub fn make_legal(desired: Option<Action>, obs: &Observables<'_>) -> Action {
 /// The CHAMELEON-powered poker brain behind the Chipzen bot.
 pub struct ChamBrain {
     agent: ChameleonAgent,
-    #[allow(dead_code)]
-    rng: Rng,
     seed: u64,
     depth_bb: i64,
     /// Per-hand shadow state; rebuilt by `start_hand`.
@@ -160,7 +158,6 @@ impl ChamBrain {
         );
         Ok(ChamBrain {
             agent,
-            rng: rng_from_seed(seed),
             seed,
             depth_bb,
             state: None,
@@ -192,6 +189,12 @@ impl ChamBrain {
     /// Called on every inbound frame that could carry one (action_accepted /
     /// turn_result / round frames) — idempotent via the stored last action.
     pub fn observe_opponent_action(&mut self, name: &str, params: &Value) {
+        if self.hand_tainted {
+            // Shadow state is out of sync with the platform (rejected action
+            // or actor mismatch). Feeding it more villain actions would
+            // compound the divergence — keep it frozen until the next hand.
+            return;
+        }
         if self.state.is_none() {
             self.start_hand();
         }
@@ -706,22 +709,6 @@ mod tests {
         assert_eq!(clamp_size(0, Some(0), Some(0)), 1);
         assert_eq!(clamp_size(-5, None, None), -5);
         assert_eq!(clamp_size(50, Some(0), Some(0)), 1);
-    }
-
-    #[test]
-    fn hand_tainted_flag_starts_false_and_has_expected_default() {
-        // Structural sanity: the flag exists on ChamBrain with a known default
-        // in load(). We assert the *field's* presence indirectly via the
-        // module: since ChamBrain::load requires artifacts, we instead assert
-        // the boolean default invariant through a fresh small struct-like
-        // check is not possible. Rely on the integration tests for full
-        // lifecycle coverage.
-        //
-        // This test intentionally exists only to keep the compiler from
-        // pruning the `hand_tainted` field if no other code path references
-        // it in some future refactor — a "canary" so removal would fail.
-        fn _takes_bool(_: bool) {}
-        _takes_bool(false);
     }
 
     #[test]
