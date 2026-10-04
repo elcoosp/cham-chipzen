@@ -338,6 +338,21 @@ impl ChamBrain {
         self.opp_acted_this_street = false;
     }
 
+    /// Notify the brain that the platform rejected our last turn_action.
+    ///
+    /// The shadow state has already been advanced with the rejected action
+    /// (see `decide_turn`), and we cannot reconstruct the state the platform
+    /// actually settled on from public info alone. Clear the shadow so the
+    /// next decision starts from a fresh hand; the current hand's remaining
+    /// turns will hit the actor-mismatch guard and degrade to the trivial
+    /// policy, which is strictly safer than acting on a stale state.
+    pub fn note_action_rejected(&mut self) {
+        warn!("platform rejected turn_action: resetting shadow state");
+        self.state = None;
+        self.log.clear();
+        self.opp_acted_this_street = false;
+    }
+
     /// Handle a clean `match_end`: close out any unfinished hand bookkeeping.
     ///
     /// Seat alternation is a *within-match* invariant (HU deals alternate

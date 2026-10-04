@@ -280,6 +280,12 @@ pub async fn handle_match_message(
                 "match: action rejected ({:?}); retrying with {}",
                 msg.reason, fallback.action
             );
+            // The shadow advanced with the rejected action; it can no longer
+            // be trusted for this hand. Reset it so subsequent turns degrade
+            // safely via the actor-mismatch guard.
+            if let Some(b) = brain {
+                b.lock().await.note_action_rejected();
+            }
             send(
                 ws,
                 &OutFrame::TurnAction {
@@ -300,9 +306,14 @@ pub async fn handle_match_message(
             warn!("match: error [{:?}] {:?}", msg.code, msg.message);
             Ok(None)
         }
-        // Frames carrying the villain's latest public action (best-effort
-        // ingestion for the CHAMELEON shadow state; unknown shapes ignored).
-        "action_accepted" | "turn_result" | "opponent_action" => {
+        // Frames carrying the villain's latest public action. We only ingest
+        // `opponent_action` — the frame whose semantics unambiguously say
+        // "the opponent did this". `action_accepted` typically echoes the
+        // action *we* just sent (already applied to the shadow in
+        // `decide_turn`), so ingesting it would double-advance the shadow.
+        // `turn_result` is likewise ambiguous (round summary vs. per-actor
+        // notification); we log it for observability but do not ingest.
+        "opponent_action" => {
             if let Some(b) = brain {
                 if let Some(name) = extract_action_name(&msg.raw) {
                     let params = msg
@@ -313,6 +324,20 @@ pub async fn handle_match_message(
                     b.lock().await.observe_opponent_action(&name, &params);
                 }
             }
+            Ok(None)
+        }
+        "action_accepted" | "turn_result" => {
+            // Not ingested (see comment above). Log at debug so we can
+            // diagnose the platform's actual frame semantics without
+            // polluting the shadow state.
+            debug!(
+                "match: observed {} frame (not ingested); shape={}",
+                msg.r#type,
+                msg.raw
+                    .get("action")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<no action field>".into())
+            );
             Ok(None)
         }
         // match_start / round_start / phase_change / round_result /
