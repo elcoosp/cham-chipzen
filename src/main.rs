@@ -179,3 +179,121 @@ impl ExitCodes {
         std::process::ExitCode::from(2)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_have_expected_values() {
+        assert_eq!(ExitCodes::ok(), std::process::ExitCode::SUCCESS);
+        // ExitCode doesn't expose its inner u8 directly; we can at least
+        // assert that fail() and usage() are distinct from ok() and from each
+        // other by re-parsing the Debug repr (stable for these variants).
+        let dbg_fail = format!("{:?}", ExitCodes::fail());
+        let dbg_usage = format!("{:?}", ExitCodes::usage());
+        let dbg_ok = format!("{:?}", ExitCodes::ok());
+        assert_ne!(dbg_fail, dbg_ok);
+        assert_ne!(dbg_usage, dbg_ok);
+        assert_ne!(dbg_fail, dbg_usage);
+    }
+
+    #[test]
+    fn args_parse_with_all_required_flags() {
+        let args = Args::try_parse_from([
+            "cham-chipzen",
+            "--base-url",
+            "wss://staging.chipzen.ai",
+            "--bot-id",
+            "bot-1",
+            "--token",
+            "cz_extbot_abc",
+        ])
+        .expect("args should parse");
+        assert_eq!(args.base_url.as_deref(), Some("wss://staging.chipzen.ai"));
+        assert_eq!(args.bot_id.as_deref(), Some("bot-1"));
+        assert_eq!(args.token.as_deref(), Some("cz_extbot_abc"));
+        assert!(!args.r#loop);
+        assert!(!args.require_agent);
+        assert_eq!(args.routing, "mixture");
+        assert_eq!(args.depth_bb, 100);
+    }
+
+    #[test]
+    fn args_default_agent_dir_is_artifacts_agent() {
+        let args = Args::try_parse_from([
+            "cham-chipzen",
+            "--base-url",
+            "wss://x",
+            "--bot-id",
+            "b",
+            "--token",
+            "t",
+        ])
+        .unwrap();
+        assert_eq!(args.agent_dir, PathBuf::from("artifacts/agent"));
+    }
+
+    #[test]
+    fn args_accept_loop_and_require_agent() {
+        let args = Args::try_parse_from([
+            "cham-chipzen",
+            "--base-url",
+            "wss://x",
+            "--bot-id",
+            "b",
+            "--token",
+            "t",
+            "--loop",
+            "--require-agent",
+        ])
+        .unwrap();
+        assert!(args.r#loop);
+        assert!(args.require_agent);
+    }
+
+    #[test]
+    fn args_parse_with_no_flags_leaves_required_fields_none() {
+        // The three "required" fields (`base_url`, `bot_id`, `token`) are
+        // modeled as `Option<String>` so clap accepts their absence; main()
+        // performs the presence check afterwards (mirroring run.py's exit-2
+        // path). When no CLI flags and no env vars are set, all three are
+        // `None` and the missing-arg check fires.
+        //
+        // If a caller's environment happens to define CHIPZEN_BASE_URL /
+        // CHIPZEN_BOT_ID / CHIPZEN_EXTBOT_TOKEN, clap's `env` feature will
+        // populate them; we therefore skip the None assertion in that case.
+        let args = Args::try_parse_from(["cham-chipzen"]).expect("parse should succeed");
+        let any_env_set = std::env::var_os("CHIPZEN_BASE_URL").is_some()
+            || std::env::var_os("CHIPZEN_BOT_ID").is_some()
+            || std::env::var_os("CHIPZEN_EXTBOT_TOKEN").is_some();
+        if !any_env_set {
+            assert!(args.base_url.is_none());
+            assert!(args.bot_id.is_none());
+            assert!(args.token.is_none());
+        }
+    }
+
+    #[test]
+    fn args_accept_routing_and_depth_overrides() {
+        let args = Args::try_parse_from([
+            "cham-chipzen",
+            "--base-url",
+            "wss://x",
+            "--bot-id",
+            "b",
+            "--token",
+            "t",
+            "--routing",
+            "argmax",
+            "--depth-bb",
+            "200",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        assert_eq!(args.routing, "argmax");
+        assert_eq!(args.depth_bb, 200);
+        assert_eq!(args.seed, 42);
+    }
+}
