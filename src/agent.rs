@@ -288,6 +288,12 @@ impl ChamBrain {
         let obs = Observables::view(state, player);
         let mut rng = child(self.seed, &format!("chipzen-decide{}-{}", self.hand_idx, pot));
         let chosen = self.agent.act(&obs, &mut rng);
+        // Clamp the engine action to the *platform's* advertised raise bounds
+        // BEFORE applying it to the shadow state. This keeps the shadow state
+        // and the platform state byte-for-byte consistent in raise sizes —
+        // otherwise a shadow-state bet of 9999 that the platform clamps to
+        // 1500 would desync every subsequent turn_request's `to_call`/`pot`.
+        let chosen = clamp_engine_action(chosen, params_hint);
         let mapped = map_engine_to_platform(chosen, valid_actions, params_hint);
         // Apply to shadow + record.
         let street_now = state.street();
@@ -361,6 +367,37 @@ fn classify_incoming(name: &str, params: &Value, preflop_first_entry: bool) -> O
         "bet" => to.map(|t| Action::Bet { to: t }).or(Some(Action::Call)),
         "raise" => to.map(|t| Action::Raise { to: t }).or(Some(Action::Call)),
         _ => None,
+    }
+}
+
+/// Clamp an engine action's raise size into the platform's advertised bounds
+/// (read from `params_hint.min` / `params_hint.max`). Non-raise actions pass
+/// through unchanged; a missing hint passes the action through unchanged.
+///
+/// This is applied *before* the action is recorded to the shadow engine and
+/// sent to the platform, so both sides agree on the exact size — critical for
+/// keeping `turn_request.state.to_call` / `.pot` consistent across turns.
+fn clamp_engine_action(chosen: Action, params_hint: &Value) -> Action {
+    let mn = params_hint.get("min").and_then(Value::as_i64);
+    let mx = params_hint.get("max").and_then(Value::as_i64);
+    match chosen {
+        Action::Bet { to } => Action::Bet {
+            to: clamp_size(to, mn, mx),
+        },
+        Action::Raise { to } => Action::Raise {
+            to: clamp_size(to, mn, mx),
+        },
+        other => other,
+    }
+}
+
+/// Clamp `to` into `[mn, mx]`, flooring at 1 (a 0-chip bet is never legal).
+fn clamp_size(to: i64, mn: Option<i64>, mx: Option<i64>) -> i64 {
+    match (mn, mx) {
+        (Some(lo), Some(hi)) => to.clamp(lo.max(1), hi.max(lo.max(1))),
+        (Some(lo), None) => to.max(lo.max(1)),
+        (None, Some(hi)) => to.min(hi.max(1)),
+        (None, None) => to,
     }
 }
 
@@ -560,6 +597,46 @@ mod tests {
     #[test]
     fn pick_platform_empty_falls_back_to_fold() {
         assert_eq!(pick_platform("check", &[]).0, "fold");
+    }
+
+    #[test]
+    fn clamp_engine_action_leaves_non_raises_untouched() {
+        let hint = json!({"min": 300, "max": 1500});
+        assert!(matches!(clamp_engine_action(Action::Fold, &hint), Action::Fold));
+        assert!(matches!(clamp_engine_action(Action::Check, &hint), Action::Check));
+        assert!(matches!(clamp_engine_action(Action::Call, &hint), Action::Call));
+    }
+
+    #[test]
+    fn clamp_engine_action_clamps_raise_and_bet() {
+        let hint = json!({"min": 300, "max": 1500});
+        assert_eq!(
+            clamp_engine_action(Action::Raise { to: 9999 }, &hint),
+            Action::Raise { to: 1500 }
+        );
+        assert_eq!(
+            clamp_engine_action(Action::Raise { to: 50 }, &hint),
+            Action::Raise { to: 300 }
+        );
+        assert_eq!(
+            clamp_engine_action(Action::Bet { to: 800 }, &hint),
+            Action::Bet { to: 800 }
+        );
+    }
+
+    #[test]
+    fn clamp_engine_action_missing_hint_passthrough() {
+        assert_eq!(
+            clamp_engine_action(Action::Raise { to: 9999 }, &Value::Null),
+            Action::Raise { to: 9999 }
+        );
+    }
+
+    #[test]
+    fn clamp_size_floors_at_one() {
+        assert_eq!(clamp_size(0, Some(0), Some(0)), 1);
+        assert_eq!(clamp_size(-5, None, None), -5);
+        assert_eq!(clamp_size(50, Some(0), Some(0)), 1);
     }
 
     #[test]
