@@ -98,7 +98,13 @@ impl StateView {
     /// failure) — port of Python `_as_int`.
     pub fn as_int(v: &Value) -> i64 {
         match v {
-            Value::Number(n) => n.as_i64().unwrap_or(0),
+            // Prefer i64; if the number is a u64 above i64::MAX (possible in
+            // principle — e.g. a token-shaped payload we misparse), fall back
+            // to a saturating i64::MAX rather than silently yielding 0.
+            Value::Number(n) => n
+                .as_i64()
+                .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
+                .unwrap_or(0),
             Value::String(s) => s.parse::<i64>().unwrap_or(0),
             _ => 0,
         }
@@ -210,7 +216,12 @@ pub enum OutFrame<'a> {
 
 impl OutFrame<'_> {
     /// Serialize to the JSON text sent over the socket.
-    pub fn to_json(&self) -> String {
+    ///
+    /// Returns a `Result` because `serde_json` serialization of a
+    /// `Value` that ever contained a non-finite float would fail — the
+    /// current frame shapes cannot, but the trait is honest about the
+    /// possibility.
+    pub fn to_json(&self) -> Result<String, crate::Error> {
         let v = match self {
             OutFrame::AuthenticateLobby { token } => serde_json::to_value(AuthenticateOut {
                 r#type: "authenticate",
@@ -252,8 +263,8 @@ impl OutFrame<'_> {
                 params,
             }),
         };
-        // Serializing these plain structs is infallible.
-        serde_json::to_string(&v.expect("out-frame serialization")).expect("json")
+        let value = v.map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        serde_json::to_string(&value).map_err(|e| crate::Error::Serialization(e.to_string()))
     }
 }
 
@@ -361,7 +372,7 @@ mod tests {
     #[test]
     fn outframe_authenticate_lobby_omits_match_id() {
         let v: serde_json::Value =
-            serde_json::from_str(&OutFrame::AuthenticateLobby { token: "tok" }.to_json()).unwrap();
+            serde_json::from_str(&OutFrame::AuthenticateLobby { token: "tok" }.to_json().unwrap()).unwrap();
         assert_eq!(v["type"], "authenticate");
         assert_eq!(v["token"], "tok");
         assert!(v.get("match_id").is_none());
@@ -370,7 +381,7 @@ mod tests {
     #[test]
     fn outframe_authenticate_match_sends_empty_token() {
         let v: serde_json::Value =
-            serde_json::from_str(&OutFrame::AuthenticateMatch { match_id: "m1" }.to_json()).unwrap();
+            serde_json::from_str(&OutFrame::AuthenticateMatch { match_id: "m1" }.to_json().unwrap()).unwrap();
         assert_eq!(v["type"], "authenticate");
         assert_eq!(v["token"], "");
         assert_eq!(v["match_id"], "m1");
@@ -379,7 +390,7 @@ mod tests {
     #[test]
     fn outframe_client_hello_carries_protocol_version() {
         let v: serde_json::Value =
-            serde_json::from_str(&OutFrame::ClientHello { match_id: "m1" }.to_json()).unwrap();
+            serde_json::from_str(&OutFrame::ClientHello { match_id: "m1" }.to_json().unwrap()).unwrap();
         assert_eq!(v["type"], "hello");
         assert_eq!(v["match_id"], "m1");
         assert_eq!(v["supported_versions"][0], "1.0");
@@ -390,7 +401,7 @@ mod tests {
     #[test]
     fn outframe_pong_lobby_has_no_match_id() {
         let v: serde_json::Value =
-            serde_json::from_str(&OutFrame::PongLobby.to_json()).unwrap();
+            serde_json::from_str(&OutFrame::PongLobby.to_json().unwrap()).unwrap();
         assert_eq!(v["type"], "pong");
         assert!(v.get("match_id").is_none());
     }
@@ -398,7 +409,7 @@ mod tests {
     #[test]
     fn outframe_pong_match_carries_match_id() {
         let v: serde_json::Value =
-            serde_json::from_str(&OutFrame::PongMatch { match_id: "m1" }.to_json()).unwrap();
+            serde_json::from_str(&OutFrame::PongMatch { match_id: "m1" }.to_json().unwrap()).unwrap();
         assert_eq!(v["type"], "pong");
         assert_eq!(v["match_id"], "m1");
     }
@@ -414,7 +425,7 @@ mod tests {
                 action: "raise",
                 params: &params,
             }
-            .to_json(),
+            .to_json().unwrap(),
         )
         .unwrap();
         assert_eq!(v["type"], "turn_action");
