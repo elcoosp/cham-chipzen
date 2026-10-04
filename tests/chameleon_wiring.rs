@@ -95,6 +95,26 @@ fn cham_brain_on_match_end_resets_for_next_match() {
     assert!(va.contains(&verb), "post-reset decision returned {verb:?}");
 }
 
+/// Simulate the "previous hand ended without us seeing its terminal action"
+/// case: play a turn, then receive a `round_start` for the next hand. The
+/// brain must reset the shadow so the next decision starts a fresh hand
+/// (rather than hitting the actor-mismatch guard against stale state).
+#[test]
+#[ignore = "requires a Chameleon artifact bundle"]
+fn cham_brain_note_new_hand_resets_shadow_cleanly() {
+    let dir = artifact_dir();
+    let mut brain = ChamBrain::load(&dir, "mixture", 100, 0x0CE4_13E7).expect("load");
+    let va: Vec<String> = vec!["fold".into(), "check".into(), "call".into()];
+
+    // Hand N: play a turn (shadow becomes mid-hand).
+    let (_v, _p) = brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
+    // Platform signals a new hand.
+    brain.note_new_hand();
+    // Hand N+1: first decision must succeed (fresh shadow, no taint).
+    let (verb, _p) = brain.decide_turn(100, 150, "preflop", &va, &serde_json::Value::Null);
+    assert!(va.contains(&verb), "post-new-hand decision returned {verb:?}");
+}
+
 #[test]
 #[ignore = "requires a Chameleon artifact bundle"]
 fn cham_brain_postflop_degrades_to_trivial_policy() {
