@@ -79,6 +79,18 @@ pub struct StateView {
     pub to_call: Value,
     #[serde(default)]
     pub pot: Value,
+    #[serde(default)]
+    pub min_raise: Value,
+    #[serde(default)]
+    pub max_raise: Value,
+    /// Public board cards (e.g. `["Ah","Kd","7c"]`); empty preflop. Tolerated
+    /// either as an array of strings or as an array of `{rank,suit}` objects.
+    #[serde(default)]
+    pub board: Value,
+    /// Street name (`"preflop"|"flop"|"turn"|"river"`) or a numeric index.
+    /// Absent → treated as `"preflop"` for backward compatibility.
+    #[serde(default)]
+    pub street: Value,
 }
 
 impl StateView {
@@ -97,6 +109,49 @@ impl StateView {
     }
     pub fn pot(&self) -> i64 {
         Self::as_int(&self.pot)
+    }
+    pub fn min_raise(&self) -> i64 {
+        Self::as_int(&self.min_raise)
+    }
+    pub fn max_raise(&self) -> i64 {
+        Self::as_int(&self.max_raise)
+    }
+
+    /// Board cards as plain rank+suit strings; empty if absent or an
+    /// unrecognised shape. Tolerates both `["Ah","Kd"]` and
+    /// `[{"rank":"A","suit":"h"}, ...]`.
+    pub fn board_cards(&self) -> Vec<String> {
+        match &self.board {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|v| {
+                    if let Some(s) = v.as_str() {
+                        return Some(s.to_string());
+                    }
+                    let r = v.get("rank").and_then(|x| x.as_str())?;
+                    let s = v.get("suit").and_then(|x| x.as_str())?;
+                    Some(format!("{r}{s}"))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Street name, normalising numeric indices. Defaults to `"preflop"` when
+    /// absent or unrecognised (backward-compatible with older servers that
+    /// did not send a `street` field).
+    pub fn street_name(&self) -> String {
+        match &self.street {
+            Value::String(s) => s.to_lowercase(),
+            Value::Number(n) => match n.as_i64() {
+                Some(0) => "preflop".into(),
+                Some(1) => "flop".into(),
+                Some(2) => "turn".into(),
+                Some(3) => "river".into(),
+                _ => "preflop".into(),
+            },
+            _ => "preflop".into(),
+        }
     }
 }
 
@@ -213,4 +268,159 @@ pub fn parse_frame(raw: &str) -> Option<Frame> {
             f.raw = v;
             Some(f)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn as_int_handles_number_and_string() {
+        assert_eq!(StateView::as_int(&json!(42)), 42);
+        assert_eq!(StateView::as_int(&json!("42")), 42);
+    }
+
+    #[test]
+    fn as_int_defaults_to_zero_on_bad_input() {
+        assert_eq!(StateView::as_int(&json!(null)), 0);
+        assert_eq!(StateView::as_int(&json!("oops")), 0);
+        assert_eq!(StateView::as_int(&json!([1, 2])), 0);
+    }
+
+    #[test]
+    fn state_view_default_is_zero() {
+        let s = StateView::default();
+        assert_eq!(s.to_call(), 0);
+        assert_eq!(s.pot(), 0);
+        assert_eq!(s.min_raise(), 0);
+        assert_eq!(s.max_raise(), 0);
+    }
+
+    #[test]
+    fn state_view_parses_raise_bounds() {
+        let v: StateView =
+            serde_json::from_value(json!({"min_raise": 200, "max_raise": "5000"})).unwrap();
+        assert_eq!(v.min_raise(), 200);
+        assert_eq!(v.max_raise(), 5000);
+    }
+
+    #[test]
+    fn state_view_defaults_street_to_preflop() {
+        let v = StateView::default();
+        assert_eq!(v.street_name(), "preflop");
+        assert!(v.board_cards().is_empty());
+    }
+
+    #[test]
+    fn state_view_parses_street_from_name_or_index() {
+        let v: StateView = serde_json::from_value(json!({"street": "Flop"})).unwrap();
+        assert_eq!(v.street_name(), "flop");
+        let v: StateView = serde_json::from_value(json!({"street": 2})).unwrap();
+        assert_eq!(v.street_name(), "turn");
+        let v: StateView = serde_json::from_value(json!({"street": 99})).unwrap();
+        assert_eq!(v.street_name(), "preflop");
+    }
+
+    #[test]
+    fn state_view_parses_board_strings_and_objects() {
+        let v: StateView =
+            serde_json::from_value(json!({"board": ["Ah", "Kd", "7c"]})).unwrap();
+        assert_eq!(v.board_cards(), vec!["Ah".to_string(), "Kd".to_string(), "7c".to_string()]);
+        let v: StateView = serde_json::from_value(json!({
+            "board": [{"rank": "A", "suit": "h"}, {"rank": "K", "suit": "d"}]
+        }))
+        .unwrap();
+        assert_eq!(v.board_cards(), vec!["Ah".to_string(), "Kd".to_string()]);
+        let v: StateView = serde_json::from_value(json!({"board": "not-an-array"})).unwrap();
+        assert!(v.board_cards().is_empty());
+    }
+
+    #[test]
+    fn parse_frame_rejects_non_objects() {
+        assert!(parse_frame("null").is_none());
+        assert!(parse_frame("[]").is_none());
+        assert!(parse_frame("garbage").is_none());
+    }
+
+    #[test]
+    fn parse_frame_populates_raw_and_type() {
+        let f = parse_frame(r#"{"type":"hello","extra":42}"#).unwrap();
+        assert_eq!(f.r#type, "hello");
+        assert_eq!(f.raw.get("extra").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    #[test]
+    fn bot_token_subprotocols_shape() {
+        assert_eq!(
+            bot_token_subprotocols("cz_extbot_abc"),
+            vec!["chipzen-bot-token".to_string(), "cz_extbot_abc".to_string()]
+        );
+    }
+
+    #[test]
+    fn outframe_authenticate_lobby_omits_match_id() {
+        let v: serde_json::Value =
+            serde_json::from_str(&OutFrame::AuthenticateLobby { token: "tok" }.to_json()).unwrap();
+        assert_eq!(v["type"], "authenticate");
+        assert_eq!(v["token"], "tok");
+        assert!(v.get("match_id").is_none());
+    }
+
+    #[test]
+    fn outframe_authenticate_match_sends_empty_token() {
+        let v: serde_json::Value =
+            serde_json::from_str(&OutFrame::AuthenticateMatch { match_id: "m1" }.to_json()).unwrap();
+        assert_eq!(v["type"], "authenticate");
+        assert_eq!(v["token"], "");
+        assert_eq!(v["match_id"], "m1");
+    }
+
+    #[test]
+    fn outframe_client_hello_carries_protocol_version() {
+        let v: serde_json::Value =
+            serde_json::from_str(&OutFrame::ClientHello { match_id: "m1" }.to_json()).unwrap();
+        assert_eq!(v["type"], "hello");
+        assert_eq!(v["match_id"], "m1");
+        assert_eq!(v["supported_versions"][0], "1.0");
+        assert_eq!(v["client_name"], CLIENT_NAME);
+        assert_eq!(v["client_version"], CLIENT_VERSION);
+    }
+
+    #[test]
+    fn outframe_pong_lobby_has_no_match_id() {
+        let v: serde_json::Value =
+            serde_json::from_str(&OutFrame::PongLobby.to_json()).unwrap();
+        assert_eq!(v["type"], "pong");
+        assert!(v.get("match_id").is_none());
+    }
+
+    #[test]
+    fn outframe_pong_match_carries_match_id() {
+        let v: serde_json::Value =
+            serde_json::from_str(&OutFrame::PongMatch { match_id: "m1" }.to_json()).unwrap();
+        assert_eq!(v["type"], "pong");
+        assert_eq!(v["match_id"], "m1");
+    }
+
+    #[test]
+    fn outframe_turn_action_echoes_request_id() {
+        let rid = json!(7);
+        let params = json!({"to": 500});
+        let v: serde_json::Value = serde_json::from_str(
+            &OutFrame::TurnAction {
+                match_id: "m1",
+                request_id: &rid,
+                action: "raise",
+                params: &params,
+            }
+            .to_json(),
+        )
+        .unwrap();
+        assert_eq!(v["type"], "turn_action");
+        assert_eq!(v["match_id"], "m1");
+        assert_eq!(v["request_id"], 7);
+        assert_eq!(v["action"], "raise");
+        assert_eq!(v["params"]["to"], 500);
+    }
 }
