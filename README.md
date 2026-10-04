@@ -48,6 +48,7 @@ feature):
 | `--depth-bb`            | —                          | Stack depth in bb; must match the trained set. Default `100`. |
 | `--seed`                | —                          | Deterministic seed for hole sampling.|
 | `-v`, `--verbose`       | `RUST_LOG`                 | Debug logging.                       |
+| `--require-agent`       | —                          | Fail fast if the CHAMELEON bundle cannot be loaded (no trivial-policy fallback). |
 
 ## Running
 
@@ -60,7 +61,9 @@ cargo run --release -- --agent-dir artifacts/agent --loop
 ```
 
 Without `--agent-dir` pointing at a valid bundle, the bot logs a warning and
-plays the trivial reference policy — useful for protocol smoke-testing.
+plays the trivial reference policy — useful for protocol smoke-testing. In
+production, pass `--require-agent` so a missing or invalid bundle is a fatal
+error rather than a silent downgrade.
 
 ## CHAMELEON artifact bundle
 
@@ -106,21 +109,46 @@ only sends action/state deltas, never a full game state:
 - **Hand end** feeds the agent a leak-disciplined `PublicHistory`
   (holes stay private; I9 in `SPECS/01 §5`).
 
-The wiring is covered by `tests/chameleon_wiring.rs`:
+### Failure-path discipline
 
-- Pure adapter tests run unconditionally.
-- `#[ignore]`d smoke tests require a real bundle. Run them with:
-  ```sh
-  CHAM_ARTIFACT_DIR=artifacts/agent \
-    cargo test --test chameleon_wiring -- --ignored
-  ```
+The shadow state can diverge from the platform's view if (a) the platform
+rejects our last `turn_action`, (b) we receive a `turn_request` while the
+shadow thinks the villain is to act, or (c) `decide_turn` panics on the
+blocking pool. In all three cases the current hand is **tainted**:
+
+- Remaining turns use the trivial reference policy (never the blueprint,
+  which would be reasoning over an out-of-sync state).
+- `finish_hand` skips the tracker update, so no partial-hand observations
+  poison the running statistics.
+- The next `start_hand` clears the flag and blueprint play resumes.
+
+A clean `match_end` or an unclean socket close also resets the shadow via
+`on_match_end`, so a network drop mid-hand cannot leak stale state into the
+next match.
 
 ## Tests
 
 ```sh
-cargo test --workspace                     # unit + adapter tests
-cargo test --test chameleon_wiring -- --ignored  # needs artifacts
+cargo test --workspace                            # unit + adapter + e2e tests
+cargo test --test chameleon_wiring -- --ignored   # needs artifacts (set CHAM_ARTIFACT_DIR)
 ```
+
+### What runs where
+
+| Suite                       | Needs                              | Covers                                                              |
+| --------------------------- | ---------------------------------- | ------------------------------------------------------------------- |
+| `src/**::tests` (unit)      | nothing                            | Verb translation, clamping, RNG seeding, URL shaping, proto frames. |
+| `tests/protocol_e2e.rs`     | nothing                            | Full lobby+match flow against in-process mock WS servers.           |
+| `tests/chameleon_wiring.rs` | artifact bundle (`#[ignore]`d)     | Brain loading, shadow-state advance, tracker discipline.            |
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `fmt --check`,
+`clippy -D warnings`, `check --all-targets`, and `test --workspace` on Linux
+and macOS. The workflow checks out `elcoosp/chameleon` as a sibling directory
+so the path deps resolve — this requires the chameleon repository to be
+accessible to the CI runner (public, or configured with a token for a
+private checkout).
 
 ## License
 
