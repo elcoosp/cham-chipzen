@@ -14,7 +14,11 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "cham-chipzen", about = "Chipzen External-API bot driven by the CHAMELEON poker agent")]
+#[command(
+    name = "cham-chipzen",
+    about = "Chipzen External-API bot driven by the CHAMELEON poker agent",
+    version
+)]
 struct Args {
     /// Platform origin (e.g. wss://staging.chipzen.ai or ws://localhost:8001).
     /// Env: CHIPZEN_BASE_URL
@@ -66,6 +70,19 @@ async fn main() -> std::process::ExitCode {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        base_url = ?args.base_url,
+        bot_id = ?args.bot_id,
+        token_len = args.token.as_ref().map(|t| t.len()),
+        loop_mode = args.r#loop,
+        agent_dir = %args.agent_dir.display(),
+        routing = %args.routing,
+        depth_bb = args.depth_bb,
+        seed = format!("0x{:x}", args.seed),
+        "cham-chipzen starting"
+    );
 
     // Required-argument check (mirrors run.py's exit code 2 path).
     let missing: Vec<&str> = [
