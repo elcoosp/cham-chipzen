@@ -1,0 +1,33 @@
+[package]
+name = "cham-chipzen"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Chipzen External-API poker bot driven by the CHAMELEON HUNL agent (Rust port of the chipzen-sdk external-api-bot reference)"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+http = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+url = "2"
+getrandom = "0.2"
+
+# ——— CHAMELEON workspace crates (path deps; point CHIPZEN_CHAM_ROOT at the
+#     chameleon checkout if you vendor this crate elsewhere) ———
+cham-core = { path = "../chameleon/crates/cham-core" }
+cham-agent = { path = "../chameleon/crates/cham-agent" }
+cham-router = { path = "../chameleon/crates/cham-router" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[profile.release]
+opt-level = 3
