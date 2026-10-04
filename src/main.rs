@@ -5,6 +5,8 @@
 //! pointing at a CHAMELEON artifact bundle, decisions come from the routed
 //! blueprint agent; otherwise the trivial check/call/fold reference policy runs.
 
+#![warn(missing_docs)]
+
 use cham_chipzen::agent::ChamBrain;
 use cham_chipzen::client::run_once;
 use clap::Parser;
@@ -19,6 +21,8 @@ use tracing_subscriber::EnvFilter;
     about = "Chipzen External-API bot driven by the CHAMELEON poker agent",
     version
 )]
+/// CLI arguments. Every field maps either to a required env var or an
+/// optional flag; see the README's Configuration section.
 struct Args {
     /// Platform origin (e.g. wss://staging.chipzen.ai or ws://localhost:8001).
     /// Env: CHIPZEN_BASE_URL
@@ -113,6 +117,35 @@ async fn main() -> std::process::ExitCode {
     let bot_id = args.bot_id.as_deref().unwrap();
     let token = args.token.as_deref().unwrap();
 
+    // --- Config validation (fail-fast) ---
+    const KNOWN_ROUTINGS: &[&str] = &["mixture", "argmax", "robust-only", "bayes"];
+    if !KNOWN_ROUTINGS.contains(&args.routing.as_str()) {
+        eprintln!(
+            "error: unknown --routing {:?}; expected one of {:?}",
+            args.routing, KNOWN_ROUTINGS
+        );
+        return ExitCodes::usage();
+    }
+    if args.depth_bb <= 0 {
+        eprintln!(
+            "error: --depth-bb must be positive, got {}",
+            args.depth_bb
+        );
+        return ExitCodes::usage();
+    }
+    if args.seed == 0 {
+        tracing::warn!("--seed is 0; consider a nonzero value for reproducible but non-trivial RNG streams");
+    }
+    if token.trim().is_empty() {
+        eprintln!("error: --token must not be empty");
+        return ExitCodes::usage();
+    }
+    if !token.starts_with("cz_extbot_") {
+        tracing::warn!(
+            "token does not start with `cz_extbot_`; the platform may reject it"
+        );
+    }
+
     // CHAMELEON brain: load artifacts when available; degrade to the trivial
     // reference policy (like the Python example) when not — unless the
     // operator explicitly required a real agent (`--require-agent`).
@@ -130,9 +163,17 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
+    // Exponential backoff for reconnect: doubles after each consecutive
+    // failure, capped at 60 s, reset to 1 s after a successful match. This
+    // avoids hammering a broken endpoint while still recovering quickly from
+    // a transient drop.
+    let mut backoff_secs: u64 = 1;
+    const MAX_BACKOFF_SECS: u64 = 60;
+
     loop {
         match run_once(base_url, bot_id, token, brain.clone()).await {
             Ok(Some(end)) => {
+                backoff_secs = 1; // healthy cycle resets backoff
                 println!(
                     "match ended: reason={} results={}",
                     end.reason
@@ -145,14 +186,21 @@ async fn main() -> std::process::ExitCode {
                         .unwrap_or_else(|| "null".into())
                 );
             }
-            Ok(None) => println!("match ended without a clean match_end frame"),
+            Ok(None) => {
+                backoff_secs = 1;
+                println!("match ended without a clean match_end frame");
+            }
             Err(e) => {
                 eprintln!("error: {e}");
                 if !args.r#loop {
                     return ExitCodes::fail();
                 }
-                tracing::warn!("reconnecting lobby after error (loop mode)");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::warn!(
+                    backoff_secs,
+                    "reconnecting lobby after error (loop mode)"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
                 continue;
             }
         }
@@ -271,6 +319,28 @@ mod tests {
             assert!(args.base_url.is_none());
             assert!(args.bot_id.is_none());
             assert!(args.token.is_none());
+        }
+    }
+
+    #[test]
+    fn known_routings_list_covers_all_documented_modes() {
+        // Keep this in sync with the README's --routing row.
+        const KNOWN: &[&str] = &["mixture", "argmax", "robust-only", "bayes"];
+        assert!(KNOWN.contains(&"mixture"));
+        assert!(KNOWN.contains(&"argmax"));
+        assert!(KNOWN.contains(&"robust-only"));
+        assert!(KNOWN.contains(&"bayes"));
+        assert_eq!(KNOWN.len(), 4);
+    }
+
+    #[test]
+    fn backoff_growth_is_monotone_and_capped() {
+        let mut b: u64 = 1;
+        const MAX: u64 = 60;
+        let expected = [1_u64, 2, 4, 8, 16, 32, 60, 60];
+        for want in expected {
+            assert_eq!(b, want, "backoff at step");
+            b = (b * 2).min(MAX);
         }
     }
 
