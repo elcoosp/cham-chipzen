@@ -58,6 +58,13 @@ struct Args {
     /// Enable debug logging (or set RUST_LOG).
     #[arg(short, long)]
     verbose: bool,
+
+    /// Refuse to run without a loadable CHAMELEON artifact bundle. When set,
+    /// a load failure is a fatal error instead of a WARN + trivial-policy
+    /// fallback. Use this in production so a bot cannot silently run on the
+    /// reference policy when the real brain fails to load.
+    #[arg(long)]
+    require_agent: bool,
 }
 
 #[tokio::main]
@@ -107,10 +114,17 @@ async fn main() -> std::process::ExitCode {
     let token = args.token.as_deref().unwrap();
 
     // CHAMELEON brain: load artifacts when available; degrade to the trivial
-    // reference policy (like the Python example) when not.
+    // reference policy (like the Python example) when not — unless the
+    // operator explicitly required a real agent (`--require-agent`).
     let brain = match ChamBrain::load(&args.agent_dir, &args.routing, args.depth_bb, args.seed) {
         Ok(b) => Some(Arc::new(Mutex::new(b))),
         Err(e) => {
+            if args.require_agent {
+                eprintln!(
+                    "error: --require-agent set but CHAMELEON bundle failed to load: {e}"
+                );
+                return ExitCodes::fail();
+            }
             tracing::warn!("running with TRIVIAL reference policy: {e}");
             None
         }
