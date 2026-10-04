@@ -69,6 +69,9 @@
 //! ```
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![warn(rust_2018_idioms)]
+#![warn(unreachable_pub)]
 
 pub mod agent;
 pub mod client;
