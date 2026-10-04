@@ -1,0 +1,150 @@
+//! Runnable entry point — port of `run.py` from the reference bot.
+//!
+//! Connects to the lobby, waits to be matched, plays one match end-to-end, and
+//! exits (`--loop` keeps cycling). With `--agent-dir` (default `artifacts/agent`)
+//! pointing at a CHAMELEON artifact bundle, decisions come from the routed
+//! blueprint agent; otherwise the trivial check/call/fold reference policy runs.
+
+use cham_chipzen::agent::ChamBrain;
+use cham_chipzen::client::run_once;
+use clap::Parser;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(name = "cham-chipzen", about = "Chipzen External-API bot driven by the CHAMELEON poker agent")]
+struct Args {
+    /// Platform origin (e.g. wss://staging.chipzen.ai or ws://localhost:8001).
+    /// Env: CHIPZEN_BASE_URL
+    #[arg(long, env = "CHIPZEN_BASE_URL")]
+    base_url: Option<String>,
+
+    /// The External-API bot's UUID. Env: CHIPZEN_BOT_ID
+    #[arg(long, env = "CHIPZEN_BOT_ID")]
+    bot_id: Option<String>,
+
+    /// The cz_extbot_ API token. Env: CHIPZEN_EXTBOT_TOKEN
+    #[arg(long, env = "CHIPZEN_EXTBOT_TOKEN")]
+    token: Option<String>,
+
+    /// Keep cycling: after a match ends, reconnect the lobby and wait for the
+    /// next match.
+    #[arg(long)]
+    r#loop: bool,
+
+    /// CHAMELEON artifact bundle directory (layout produced by cham-cli
+    /// train-buckets + train-bp + train-router). Default: artifacts/agent
+    #[arg(long, default_value = "artifacts/agent")]
+    agent_dir: PathBuf,
+
+    /// Routing mode passed to cham_agent::loader (mixture|argmax|robust-only|bayes).
+    #[arg(long, default_value = "mixture")]
+    routing: String,
+
+    /// Stack depth in bb for the shadow engine (must match the trained set).
+    #[arg(long, default_value_t = 100)]
+    depth_bb: i64,
+
+    /// Deterministic seed for hole sampling / decision draws per match.
+    #[arg(long, default_value_t = 0xCE41_3E7)]
+    seed: u64,
+
+    /// Enable debug logging (or set RUST_LOG).
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let args = Args::parse();
+
+    let filter = if args.verbose {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // Required-argument check (mirrors run.py's exit code 2 path).
+    let missing: Vec<&str> = [
+        ("--base-url", &args.base_url),
+        ("--bot-id", &args.bot_id),
+        ("--token", &args.token),
+    ]
+    .iter()
+    .filter(|(_, v)| v.is_none())
+    .map(|(n, _)| *n)
+    .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "error: missing required argument(s): {}\n\
+             pass them as flags or via CHIPZEN_BASE_URL / CHIPZEN_BOT_ID / CHIPZEN_EXTBOT_TOKEN",
+            missing.join(", ")
+        );
+        return ExitCodes::usage();
+    }
+    let base_url = args.base_url.as_deref().unwrap();
+    let bot_id = args.bot_id.as_deref().unwrap();
+    let token = args.token.as_deref().unwrap();
+
+    // CHAMELEON brain: load artifacts when available; degrade to the trivial
+    // reference policy (like the Python example) when not.
+    let brain = match ChamBrain::load(&args.agent_dir, &args.routing, args.depth_bb, args.seed) {
+        Ok(b) => Some(Arc::new(Mutex::new(b))),
+        Err(e) => {
+            tracing::warn!("running with TRIVIAL reference policy: {e}");
+            None
+        }
+    };
+
+    loop {
+        match run_once(base_url, bot_id, token, brain.clone()).await {
+            Ok(Some(end)) => {
+                println!(
+                    "match ended: reason={} results={}",
+                    end.reason
+                        .as_deref()
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    end
+                        .results
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "null".into())
+                );
+            }
+            Ok(None) => println!("match ended without a clean match_end frame"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                if !args.r#loop {
+                    return ExitCodes::fail();
+                }
+                tracing::warn!("reconnecting lobby after error (loop mode)");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        }
+        if !args.r#loop {
+            break;
+        }
+    }
+    ExitCodes::ok()
+}
+
+/// Process exit codes mirroring run.py (0 ok, 2 usage, 1 failure, 130 ^C is
+/// handled by the shell/job control). Provided as fns because
+/// `ExitCode::from(u8)` is not a const fn.
+struct ExitCodes;
+
+impl ExitCodes {
+    fn ok() -> std::process::ExitCode {
+        std::process::ExitCode::SUCCESS
+    }
+    fn fail() -> std::process::ExitCode {
+        std::process::ExitCode::from(1)
+    }
+    fn usage() -> std::process::ExitCode {
+        std::process::ExitCode::from(2)
+    }
+}
