@@ -54,10 +54,10 @@ fn normalise_base(base_url: &str) -> Result<String, Error> {
         Some(Host::Ipv6(v6)) => format!("[{v6}]"),
         None => return Err(Error::Connection("base-url has no host".into())),
     };
-    let port = u
-        .port_or_known_default()
-        .filter(|p| *p != 443 || scheme != "wss")
-        .or_else(|| u.port());
+    // Keep only an *explicit* port from the input URL. Default ports implied
+    // by scheme (80/http, 443/https, etc.) must not leak into the output —
+    // tests assert `http://example.com` → `ws://example.com` (no `:80`).
+    let port = u.port();
     Ok(match port {
         Some(p) => format!("{scheme}://{host_str}:{p}"),
         None => format!("{scheme}://{host_str}"),
@@ -329,11 +329,25 @@ pub async fn handle_match_message(
 /// action-notification frame (`action: "call"` / `action: {name: ...}` /
 /// `action_name: ...` shapes all tolerated).
 fn extract_action_name(raw: &serde_json::Value) -> Option<String> {
-    raw.get("action").and_then(|v| {
-        v.as_str()
-            .map(str::to_string)
-            .or_else(|| v.get("name").and_then(|n| n.as_str().map(str::to_string)))
-    })
+    // Tolerate the shapes observed / anticipated on the wire:
+    //   {"action": "call"}
+    //   {"action": {"name": "call"}}
+    //   {"action": {"type": "call"}}
+    //   {"action_name": "call"}
+    if let Some(v) = raw.get("action_name").and_then(|v| v.as_str()) {
+        return Some(v.to_string());
+    }
+    let v = raw.get("action")?;
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(s) = v.get("name").and_then(|n| n.as_str()) {
+        return Some(s.to_string());
+    }
+    if let Some(s) = v.get("type").and_then(|n| n.as_str()) {
+        return Some(s.to_string());
+    }
+    None
 }
 
 /// Decide the reply to a turn_request: CHAMELEON brain when loaded, trivial
@@ -343,15 +357,27 @@ async fn decide_action(
     state: StateView,
     valid_actions: &[String],
 ) -> (String, serde_json::Value) {
-    let hint = serde_json::Value::Object(serde_json::Map::new());
+    // Build a params hint from the platform's raise bounds so the brain's
+    // mapping layer can clamp requested sizes to server-accepted ranges.
+    let mut hint_map = serde_json::Map::new();
+    let mn = state.min_raise();
+    let mx = state.max_raise();
+    if mx > 0 {
+        hint_map.insert("min".into(), serde_json::Value::Number(mn.into()));
+        hint_map.insert("max".into(), serde_json::Value::Number(mx.into()));
+    }
+    let hint = serde_json::Value::Object(hint_map);
     match brain {
         Some(b) => {
             let b = b.clone();
             let va = valid_actions.to_vec();
             let (to_call, pot) = (state.to_call(), state.pot());
-            let result =
-                tokio::task::spawn_blocking(move || b.blocking_lock().decide_turn(to_call, pot, &va, &hint))
-                    .await;
+            let street = state.street_name();
+            let result = tokio::task::spawn_blocking(move || {
+                b.blocking_lock()
+                    .decide_turn(to_call, pot, &street, &va, &hint)
+            })
+            .await;
             match result {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -392,4 +418,100 @@ pub async fn run_once(
         .clone()
         .ok_or_else(|| Error::Connection("matched frame lacks match_id".into()))?;
     play_match(&gateway_url, &match_id, token, brain).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalise_base_strips_path_and_downgrades_https() {
+        assert_eq!(
+            normalise_base("wss://example.com/ws/external").unwrap(),
+            "wss://example.com"
+        );
+        assert_eq!(
+            normalise_base("https://example.com/api").unwrap(),
+            "wss://example.com"
+        );
+        assert_eq!(
+            normalise_base("http://example.com").unwrap(),
+            "ws://example.com"
+        );
+    }
+
+    #[test]
+    fn normalise_base_defaults_scheme_to_wss() {
+        assert_eq!(normalise_base("example.com").unwrap(), "wss://example.com");
+    }
+
+    #[test]
+    fn normalise_base_keeps_explicit_port() {
+        assert_eq!(
+            normalise_base("ws://localhost:8001").unwrap(),
+            "ws://localhost:8001"
+        );
+    }
+
+    #[test]
+    fn lobby_ws_url_shape() {
+        assert_eq!(
+            lobby_ws_url("wss://staging.chipzen.ai", "abc-123").unwrap(),
+            "wss://staging.chipzen.ai/ws/external/bot/abc-123"
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_url_appends_path() {
+        assert_eq!(
+            resolve_gateway_url("wss://staging.chipzen.ai", "/ws/external/match/m1/p1").unwrap(),
+            "wss://staging.chipzen.ai/ws/external/match/m1/p1"
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_url_inserts_missing_leading_slash() {
+        assert_eq!(
+            resolve_gateway_url("wss://staging.chipzen.ai", "ws/external/match/m1/p1").unwrap(),
+            "wss://staging.chipzen.ai/ws/external/match/m1/p1"
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_url_passes_absolute_through() {
+        assert_eq!(
+            resolve_gateway_url("wss://staging.chipzen.ai", "wss://other.host/foo").unwrap(),
+            "wss://other.host/foo"
+        );
+    }
+
+    #[test]
+    fn transport_security_rejects_remote_ws() {
+        assert!(check_transport_security("ws://example.com").is_err());
+        assert!(check_transport_security("wss://example.com").is_ok());
+        assert!(check_transport_security("ws://localhost:8001").is_ok());
+        assert!(check_transport_security("ws://127.0.0.1:8001").is_ok());
+    }
+
+    #[test]
+    fn extract_action_name_tolerates_observed_shapes() {
+        use serde_json::json;
+        assert_eq!(
+            extract_action_name(&json!({"action": "call"})),
+            Some("call".to_string())
+        );
+        assert_eq!(
+            extract_action_name(&json!({"action": {"name": "raise"}})),
+            Some("raise".to_string())
+        );
+        assert_eq!(
+            extract_action_name(&json!({"action": {"type": "bet"}})),
+            Some("bet".to_string())
+        );
+        assert_eq!(
+            extract_action_name(&json!({"action_name": "fold"})),
+            Some("fold".to_string())
+        );
+        assert_eq!(extract_action_name(&json!({"foo": 1})), None);
+    }
 }
