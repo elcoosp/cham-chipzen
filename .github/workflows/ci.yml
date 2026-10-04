@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build / ${{ matrix.os }} / ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable]
+    steps:
+      - name: Checkout cham-chipzen
+        uses: actions/checkout@v4
+        with:
+          path: cham-chipzen
+
+      - name: Checkout chameleon (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: elcoosp/chameleon
+          path: chameleon
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cham-chipzen/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        working-directory: cham-chipzen
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: cham-chipzen
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo check
+        working-directory: cham-chipzen
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        working-directory: cham-chipzen
+        run: cargo test --workspace
